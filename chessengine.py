@@ -7,9 +7,9 @@ import concurrent.futures
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QMessageBox,
-    QDialog, QDialogButtonBox, QVBoxLayout, QPushButton, QComboBox
+    QDialog, QDialogButtonBox, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox, QRadioButton, QGroupBox, QButtonGroup, QSpacerItem, QSizePolicy
 )
-from PyQt6.QtGui import QPainter, QColor, QFont
+from PyQt6.QtGui import QPainter, QColor, QFont, QPixmap
 from PyQt6.QtCore import Qt, QSize, QPoint, QTimer
 
 class Color(Enum):
@@ -433,39 +433,140 @@ class Board:
             return "Draw by 50‑move rule."
         return None
 
-class BoardWidget(QWidget):
-    """Interactive chessboard widget."""
+# Modern combined dialog for mode and color selection
+class GameSetupDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Start New Game")
+        self.setMinimumWidth(320)
+        layout = QVBoxLayout(self)
 
+        # Mode selection
+        mode_group = QGroupBox("Game Mode")
+        mode_layout = QVBoxLayout()
+        self.rb_2p = QRadioButton("Two Player")
+        self.rb_ai = QRadioButton("Play vs AI")
+        self.rb_2p.setChecked(True)
+        mode_layout.addWidget(self.rb_2p)
+        mode_layout.addWidget(self.rb_ai)
+        mode_group.setLayout(mode_layout)
+        layout.addWidget(mode_group)
+
+        # Color selection (only enabled if AI)
+        color_group = QGroupBox("Your Color")
+        color_layout = QHBoxLayout()
+        self.rb_white = QRadioButton("White")
+        self.rb_black = QRadioButton("Black")
+        self.rb_white.setChecked(True)
+        color_layout.addWidget(self.rb_white)
+        color_layout.addWidget(self.rb_black)
+        color_group.setLayout(color_layout)
+        layout.addWidget(color_group)
+
+        # Enable/disable color selection based on mode
+        def update_color_enabled():
+            color_group.setEnabled(self.rb_ai.isChecked())
+        self.rb_2p.toggled.connect(update_color_enabled)
+        self.rb_ai.toggled.connect(update_color_enabled)
+        update_color_enabled()
+
+        # OK/Cancel buttons
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    @property
+    def mode(self):
+        return "ai" if self.rb_ai.isChecked() else "2p"
+
+    @property
+    def color(self):
+        return Color.WHITE if self.rb_white.isChecked() else Color.BLACK
+
+# Place BoardWidget here, before MainWindow
+class BoardWidget(QWidget):
     def __init__(self, board: Board, parent=None):
         super().__init__(parent)
         self.board = board
-        self.square = 64  # px
-        self.setMinimumSize(QSize(self.square * 8, self.square * 8))
-        self.setFont(QFont("Arial", 32))
+        self.square = 72  # px, larger for better visuals
+        self.margin = 16  # px, padding around the board
+        self.setMinimumSize(QSize(self.square * 8 + 2 * self.margin, self.square * 8 + 2 * self.margin))
+        self.setFont(QFont("Arial Unicode MS", 40, QFont.Weight.Bold))
         self.selected: tuple[int, int] | None = None
         self.candidates: list[Move] = []
+        # Load piece images
+        self.piece_images = {}
+        import os
+        piece_codes = {
+            (Color.WHITE, PieceType.KING): 'wK',
+            (Color.WHITE, PieceType.QUEEN): 'wQ',
+            (Color.WHITE, PieceType.ROOK): 'wR',
+            (Color.WHITE, PieceType.BISHOP): 'wB',
+            (Color.WHITE, PieceType.KNIGHT): 'wN',
+            (Color.WHITE, PieceType.PAWN): 'wP',
+            (Color.BLACK, PieceType.KING): 'bK',
+            (Color.BLACK, PieceType.QUEEN): 'bQ',
+            (Color.BLACK, PieceType.ROOK): 'bR',
+            (Color.BLACK, PieceType.BISHOP): 'bB',
+            (Color.BLACK, PieceType.KNIGHT): 'bN',
+            (Color.BLACK, PieceType.PAWN): 'bP',
+        }
+        for key, code in piece_codes.items():
+            path = os.path.join(os.path.dirname(__file__), 'pieces', f'{code}.png')
+            if os.path.exists(path):
+                self.piece_images[key] = QPixmap(path)
+            else:
+                self.piece_images[key] = None
 
     def paintEvent(self, _):
         p = QPainter(self)
-        light, dark = QColor(240, 217, 181), QColor(181, 136, 99)
-        hi_sel = QColor(246, 246, 105, 100)
-        hi_move = QColor(246, 246, 105, 160)
+        # High-contrast palette for white Unicode pieces
+        light = QColor(120, 150, 180)  # muted blue
+        dark = QColor(40, 60, 80)      # deep navy
+        hi_sel = QColor(255, 215, 0, 120)      # gold highlight for selected
+        hi_move = QColor(80, 200, 120, 120)    # green for possible moves
+        hi_last = QColor(255, 255, 0, 60)      # yellow for last move
 
+        # Draw board squares
         for r in range(8):
             for c in range(8):
-                rect = (c * self.square, r * self.square, self.square, self.square)
+                rect = (
+                    self.margin + c * self.square,
+                    self.margin + r * self.square,
+                    self.square, self.square
+                )
                 p.fillRect(*rect, light if (r + c) % 2 == 0 else dark)
 
-                if self.selected == (r, c):
-                    p.fillRect(*rect, hi_sel)
-                elif any(mv.to_row == r and mv.to_col == c for mv in self.candidates):
-                    p.fillRect(*rect, hi_move)
+        # Highlight selected square
+        if self.selected:
+            r, c = self.selected
+            rect = (
+                self.margin + c * self.square,
+                self.margin + r * self.square,
+                self.square, self.square
+            )
+            p.fillRect(*rect, hi_sel)
 
+        # Highlight candidate move targets
+        for mv in self.candidates:
+            rect = (
+                self.margin + mv.to_col * self.square,
+                self.margin + mv.to_row * self.square,
+                self.square, self.square
+            )
+            p.fillRect(*rect, hi_move)
+
+        # Draw pieces using PNGs, centered
+        for r in range(8):
+            for c in range(8):
                 piece = self.board._piece_at(r, c)
                 if piece:
-                    p.drawText(QPoint(c * self.square + self.square // 4,
-                                      r * self.square + int(self.square * 0.75)),
-                                UNICODE_PIECES[(piece.color, piece.kind)])
+                    img = self.piece_images.get((piece.color, piece.kind))
+                    if img and not img.isNull():
+                        rect_x = self.margin + c * self.square
+                        rect_y = self.margin + r * self.square
+                        p.drawPixmap(rect_x, rect_y, self.square, self.square, img)
 
     def mousePressEvent(self, evt):
         # Block input if AI is thinking
@@ -515,39 +616,7 @@ class BoardWidget(QWidget):
         dlg.exec()
         return choice.get("p", PieceType.QUEEN)
 
-
-class ModeDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Choose Game Mode")
-        layout = QVBoxLayout(self)
-        self.mode = None
-        btn2p = QPushButton("Two Player")
-        btnai = QPushButton("Play vs AI")
-        layout.addWidget(btn2p)
-        layout.addWidget(btnai)
-        btn2p.clicked.connect(lambda: self._choose("2p"))
-        btnai.clicked.connect(lambda: self._choose("ai"))
-    def _choose(self, mode):
-        self.mode = mode
-        self.accept()
-
-class ColorDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Choose Your Color")
-        layout = QVBoxLayout(self)
-        self.color = None
-        btnw = QPushButton("White")
-        btnb = QPushButton("Black")
-        layout.addWidget(btnw)
-        layout.addWidget(btnb)
-        btnw.clicked.connect(lambda: self._choose(Color.WHITE))
-        btnb.clicked.connect(lambda: self._choose(Color.BLACK))
-    def _choose(self, color):
-        self.color = color
-        self.accept()
-
+# MainWindow comes after BoardWidget
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -571,17 +640,16 @@ class MainWindow(QMainWindow):
         timer.start(200)
 
     def _choose_mode_and_color(self):
-        dlg = ModeDialog(self)
+        dlg = GameSetupDialog(self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.mode = dlg.mode
-        if self.mode == "ai":
-            cdlg = ColorDialog(self)
-            if cdlg.exec() == QDialog.DialogCode.Accepted:
-                self.ai_color = cdlg.color
+            if self.mode == "ai":
+                self.ai_color = dlg.color
                 self.board.turn = Color.WHITE if self.ai_color == Color.BLACK else Color.WHITE
             else:
-                self.ai_color = Color.BLACK  # fallback
+                self.ai_color = None
         else:
+            self.mode = "2p"
             self.ai_color = None
 
     def _refresh_status(self):
