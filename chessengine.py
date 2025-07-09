@@ -642,7 +642,10 @@ class MainWindow(QMainWindow):
             if (p := board._piece_at(r, c))
         )
         turn = board.turn.value
-        cr = tuple((color.value, dict(board.castling_rights[color])) for color in (Color.WHITE, Color.BLACK))
+        cr = tuple(
+            (color.value, tuple(sorted(board.castling_rights[color].items())))
+            for color in (Color.WHITE, Color.BLACK)
+        )
         ep = board.en_passant_target
         return hash((pieces, turn, cr, ep))
 
