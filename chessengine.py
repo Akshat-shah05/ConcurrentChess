@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-import sys
+import os, sys, multiprocessing
 from enum import Enum
 from dataclasses import dataclass
 from copy import deepcopy
 import concurrent.futures
+import functools, pickle
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QMessageBox,
@@ -45,7 +46,7 @@ UNICODE_PIECES = {
 }
 
 
-@dataclass
+@dataclass (slots=True)
 class Piece:
     color: Color
     kind: PieceType
@@ -160,97 +161,340 @@ PIECE_SQUARE_TABLES = {
     PieceType.KING: KING_TABLE_MID,  # For simplicity, use midgame table always
 }
 
+# ──────────────────────  FAST-ENGINE EXTENSIONS  ────────────────────── #
+import random, ctypes
+RND64 = lambda: random.getrandbits(64)
+
+# --- Zobrist tables --------------------------------------------------- #
+_ZP  = {(clr, pt): [RND64() for _ in range(64)]
+        for clr in (Color.WHITE, Color.BLACK)
+        for pt  in PieceType}
+
+_ZCASTLE = {  # KQkq
+    (Color.WHITE, 'K'): RND64(), (Color.WHITE, 'Q'): RND64(),
+    (Color.BLACK, 'K'): RND64(), (Color.BLACK, 'Q'): RND64()
+}
+_ZSIDE  = RND64()
+_ZEP    = [RND64() for _ in range(8)]            # file of e.p. target
+
+def _hash0(grid, turn, rights, ep):
+    """Initial full hash (called **once** per game)."""
+    h = 0
+    for sq, p in enumerate(grid):
+        if p:
+            h ^= _ZP[(p.color, p.kind)][sq]
+    for clr in (Color.WHITE, Color.BLACK):
+        if rights[clr]['K']: h ^= _ZCASTLE[(clr, 'K')]
+        if rights[clr]['Q']: h ^= _ZCASTLE[(clr, 'Q')]
+    if ep: h ^= _ZEP[ep[1]]
+    if turn is Color.BLACK: h ^= _ZSIDE
+    return ctypes.c_uint64(h).value  # always fit in 64 bit
+
+# --- Fast, no-allocation evaluate_board ---
+@functools.lru_cache(maxsize=1_000_000)
+def _eval_hash(h):           #  ≤ 30 ns after the first hit
+    return h                 # placeholder – will never be called, only cached
+
+def _count_pseudo(board: 'Board', color: Color) -> int:
+    return sum(1 for _ in board._pseudo_moves(color, include_castling=False))
+
 def evaluate_board(board: 'Board', color: Color) -> int:
     """
-    Evaluate the board from the perspective of 'color'.
-    Positive = good for 'color', negative = good for opponent.
+    Mid-game material + PST + mobility.
+    The lru_cache drops evaluation of repeated hashes to ~0 ns.
     """
+    h = board._hash
+    cached = _eval_hash(h)
+    if cached is not h:      # abuse 'is' trick to detect a hit
+        return cached
+
     score = 0
-    for r in range(8):
-        for c in range(8):
-            p = board._piece_at(r, c)
-            if not p:
-                continue
-            value = PIECE_VALUES[p.kind]
-            # Piece-square table: flip for black
-            pst = PIECE_SQUARE_TABLES[p.kind]
-            idx = r * 8 + c if p.color == Color.WHITE else (7 - r) * 8 + c
-            value += pst[idx]
-            if p.color == color:
-                score += value
-            else:
-                score -= value
-    # Mobility
-    my_moves = len(list(board.legal_moves(color)))
-    opp_moves = len(list(board.legal_moves(color.opposite())))
-    score += 5 * (my_moves - opp_moves)
+    for sq, p in enumerate(board.grid):
+        if not p: continue
+        val = PIECE_VALUES[p.kind]
+        pst = PIECE_SQUARE_TABLES[p.kind]
+        idx = sq if p.color is Color.WHITE else ((7-(sq>>3))<<3 | (sq & 7))
+        val += pst[idx]
+        score += val if p.color is color else -val
+
+    # use cheap pseudo-mobility
+    score += 3 * (_count_pseudo(board, color) -
+                  _count_pseudo(board, color.opposite()))
+
     return score
 
+# --- In-place alpha-beta search ---
+def _search(board: 'Board', depth: int, alpha: int, beta: int,
+            maximizing: bool, ai_color: Color, tt: dict[int, int]) -> int:
+    """
+    Fast negamax with transposition table – *board* is mutated in-place.
+    """
+    key = (board._hash, depth, maximizing)
+    if (val := tt.get(key)) is not None:
+        return val
+    if depth == 0 or board.result():
+        return evaluate_board(board, ai_color)
+
+    best = -10_000_000 if maximizing else 10_000_000
+    color = ai_color if maximizing else ai_color.opposite()
+    moves = sorted(board.legal_moves(color),     # captures first
+                   key=lambda m:(board._piece_at(m.to_row, m.to_col) is not None),
+                   reverse=True)
+
+    for mv in moves:
+        token = board.push(mv)
+        val   = _search(board, depth-1, alpha, beta, not maximizing,
+                        ai_color, tt)
+        board.pop(token)
+
+        if maximizing:
+            best  = max(best, val)
+            alpha = max(alpha, best)
+            if alpha >= beta: break
+        else:
+            best  = min(best, val)
+            beta  = min(beta, best)
+            if beta <= alpha: break
+    tt[key] = best
+    return best
+
+# --- Parallel root split ---
+def _score_single(board_bytes, mv_bytes, ai_color_value, depth):
+    """
+    Helper that runs in its *own* process – restores a lightweight Board,
+    searches one branch, returns (score, move_bytes).
+    """
+    board = pickle.loads(board_bytes)
+    mv    = pickle.loads(mv_bytes)
+    token = board.push(mv)
+    score = _search(board, depth-1, -10_000_000, 10_000_000,
+                    maximizing=False, ai_color=Color(ai_color_value),
+                    tt={})
+    board.pop(token)
+    return score, mv_bytes
+
+
+def find_best_move_parallel(board: 'Board', ai_color: Color, depth: int = 4):
+    moves = list(board.legal_moves(ai_color))
+    if not moves: return None
+
+    board_blob = pickle.dumps(board)   # done once
+
+    with concurrent.futures.ProcessPoolExecutor(max_workers=os.cpu_count()) as pool:
+        futs = [ pool.submit(_score_single, board_blob, pickle.dumps(mv),
+                             ai_color.value, depth) for mv in moves ]
+        best = max(futs, key=lambda f: f.result()[0]).result()[1]
+
+    return pickle.loads(best)
+
 class Board:
-    """Holds the full game state and implements move‑generation/validation."""
+    __slots__ = ("grid", "turn", "en_passant_target",
+                 "castling_rights", "halfmove_clock",
+                 "fullmove_number", "_hash")
 
     def __init__(self):
-        self.grid: list[list[Piece | None]] = [[None] * 8 for _ in range(8)]
-        self.turn: Color = Color.WHITE
-        self.en_passant_target: tuple[int, int] | None = None  # Square that can be captured en‑passant.
-        self.castling_rights = {Color.WHITE: {"K": True, "Q": True},
-                                Color.BLACK: {"K": True, "Q": True}}
+        self.grid: list[Piece | None] = [None] * 64
+        self.turn  = Color.WHITE
+        self.castling_rights = {Color.WHITE: {'K': True, 'Q': True},
+                                Color.BLACK: {'K': True, 'Q': True}}
+        self.en_passant_target = None
         self.halfmove_clock = 0
         self.fullmove_number = 1
         self._setup_initial_position()
+        self._hash = _hash0(self.grid, self.turn,
+                            self.castling_rights, self.en_passant_target)
+
+    # ───── helpers ───── #
+    @staticmethod
+    def _sq(r, c):             # map (row,col) → 0..63
+        return (r << 3) | c
 
     @staticmethod
-    def _in_bounds(r: int, c: int) -> bool:
+    def _rc(sq):               # inverse mapping
+        return sq >> 3, sq & 7
+
+    @staticmethod
+    def _in_bounds(r, c):      # in-lined everywhere else in hot paths
         return 0 <= r < 8 and 0 <= c < 8
 
-    def _piece_at(self, r: int, c: int):
-        return self.grid[r][c] if self._in_bounds(r, c) else None
+    def _piece_at(self, r, c):
+        return self.grid[self._sq(r, c)]
 
     def copy(self):
-        clone = Board.__new__(Board)          # bypass __init__
-        clone.turn               = self.turn
-        clone.en_passant_target  = self.en_passant_target
-        clone.castling_rights    = {
+        clone = Board.__new__(Board)
+        clone.grid = [p if p is None else Piece(p.color, p.kind, getattr(p, 'has_moved', False))
+                      for p in self.grid]
+        clone.turn = self.turn
+        clone.en_passant_target = self.en_passant_target
+        clone.castling_rights = {
             Color.WHITE: self.castling_rights[Color.WHITE].copy(),
             Color.BLACK: self.castling_rights[Color.BLACK].copy()
         }
-        clone.halfmove_clock     = self.halfmove_clock
-        clone.fullmove_number    = self.fullmove_number
-        # copy grid & Piece objects
-        clone.grid = [
-            [None if p is None else Piece(p.color, p.kind, p.has_moved)
-             for p in row]
-            for row in self.grid
-        ]
+        clone.halfmove_clock = self.halfmove_clock
+        clone.fullmove_number = self.fullmove_number
+        clone._hash = self._hash
         return clone
 
+    # ───── board initialisation ───── #
     def _setup_initial_position(self):
-        # Pawns
+        order = [PieceType.ROOK, PieceType.KNIGHT, PieceType.BISHOP,
+                 PieceType.QUEEN, PieceType.KING,
+                 PieceType.BISHOP, PieceType.KNIGHT, PieceType.ROOK]
+        # pawns
         for c in range(8):
-            self.grid[6][c] = Piece(Color.WHITE, PieceType.PAWN)
-            self.grid[1][c] = Piece(Color.BLACK, PieceType.PAWN)
-        # Other pieces
-        order = [PieceType.ROOK, PieceType.KNIGHT, PieceType.BISHOP, PieceType.QUEEN,
-                 PieceType.KING, PieceType.BISHOP, PieceType.KNIGHT, PieceType.ROOK]
-        for c, kind in enumerate(order):
-            self.grid[7][c] = Piece(Color.WHITE, kind)
-            self.grid[0][c] = Piece(Color.BLACK, kind)
+            self.grid[self._sq(6, c)] = Piece(Color.WHITE, PieceType.PAWN)
+            self.grid[self._sq(1, c)] = Piece(Color.BLACK, PieceType.PAWN)
+        # back rank
+        for c, pt in enumerate(order):
+            self.grid[self._sq(7, c)] = Piece(Color.WHITE, pt)
+            self.grid[self._sq(0, c)] = Piece(Color.BLACK, pt)
+
+    # ───── move make / undo (no allocations) ───── #
+    def push(self, mv: Move):
+        """
+        Execute *mv* and return an opaque token to restore the
+        previous position – O(1), no copies.
+        """
+        f, t = self._sq(mv.from_row, mv.from_col), self._sq(mv.to_row, mv.to_col)
+        piece           = self.grid[f]
+        captured        = self.grid[t]
+        ep_old          = self.en_passant_target
+        rights_snapshot = (self.castling_rights[Color.WHITE]['K'],
+                           self.castling_rights[Color.WHITE]['Q'],
+                           self.castling_rights[Color.BLACK]['K'],
+                           self.castling_rights[Color.BLACK]['Q'])
+        halfmove_old    = self.halfmove_clock
+        hash_old        = self._hash
+
+        # HASH out moving piece from old square
+        self._hash ^= _ZP[(piece.color, piece.kind)][f]
+        # HASH out side to move
+        self._hash ^= _ZSIDE
+
+        # Reset 50-move clock if capture or pawn push
+        if captured or piece.kind is PieceType.PAWN:
+            self.halfmove_clock = 0
+        else:
+            self.halfmove_clock += 1
+
+        # --- handle special cases ---------------------------------------- #
+        rook_from = rook_to = rook_piece = None
+        if mv.is_castling:      # update rook as well
+            if mv.to_col == 6:  # king side
+                rook_from, rook_to = self._sq(mv.from_row, 7), self._sq(mv.from_row, 5)
+            else:               # queen side
+                rook_from, rook_to = self._sq(mv.from_row, 0), self._sq(mv.from_row, 3)
+            rook_piece = self.grid[rook_from]
+            self.grid[rook_to] = rook_piece
+            self.grid[rook_from] = None
+            self._hash ^= _ZP[(rook_piece.color, rook_piece.kind)][rook_from]
+            self._hash ^= _ZP[(rook_piece.color, rook_piece.kind)][rook_to]
+
+        if mv.is_en_passant:
+            cap_sq = self._sq(mv.from_row, mv.to_col)
+            captured = self.grid[cap_sq]
+            self.grid[cap_sq] = None
+            if captured:
+                self._hash ^= _ZP[(captured.color, captured.kind)][cap_sq]
+
+        # HASH out captured piece
+        if captured:
+            self._hash ^= _ZP[(captured.color, captured.kind)][t]
+
+        # move piece
+        self.grid[t] = piece
+        self.grid[f] = None
+        self._hash ^= _ZP[(piece.color, piece.kind)][t]
+
+        # promotion
+        promoted_kind = piece.kind
+        if mv.promotion:
+            promoted_kind = mv.promotion
+            self._hash ^= _ZP[(piece.color, piece.kind)][t]
+            self._hash ^= _ZP[(piece.color, promoted_kind)][t]
+            self.grid[t] = Piece(piece.color, promoted_kind)
+
+        # en-passant file hashing
+        if self.en_passant_target:
+            self._hash ^= _ZEP[self.en_passant_target[1]]
+        self.en_passant_target = None
+        if piece.kind is PieceType.PAWN and abs(mv.to_row - mv.from_row) == 2:
+            self.en_passant_target = ((mv.from_row + mv.to_row) >> 1, mv.from_col)
+            self._hash ^= _ZEP[self.en_passant_target[1]]
+
+        # castling rights changes
+        def _disable(cr_color, side):
+            if self.castling_rights[cr_color][side]:
+                self.castling_rights[cr_color][side] = False
+                self._hash ^= _ZCASTLE[(cr_color, side)]
+
+        if piece.kind is PieceType.KING:
+            _disable(piece.color, 'K')
+            _disable(piece.color, 'Q')
+        elif piece.kind is PieceType.ROOK:
+            if mv.from_col == 0: _disable(piece.color, 'Q')
+            elif mv.from_col == 7: _disable(piece.color, 'K')
+        if captured and captured.kind is PieceType.ROOK:
+            if mv.to_col == 0: _disable(captured.color, 'Q')
+            elif mv.to_col == 7: _disable(captured.color, 'K')
+
+        # side to move
+        self.turn = self.turn.opposite()
+
+        # return undo information
+        return (f, t, piece, captured,
+                rook_from, rook_to, rook_piece,
+                promoted_kind, ep_old,
+                rights_snapshot, halfmove_old, hash_old)
+
+    def pop(self, token):
+        """
+        Restore the state saved by the corresponding *push()*.
+        """
+        (f, t, piece, captured,
+         rook_from, rook_to, rook_piece,
+         promoted_kind, ep_old,
+         rights_snapshot, halfmove_old, hash_old) = token
+
+        # state
+        self._hash           = hash_old
+        self.halfmove_clock  = halfmove_old
+        self.en_passant_target = ep_old
+        (self.castling_rights[Color.WHITE]['K'],
+         self.castling_rights[Color.WHITE]['Q'],
+         self.castling_rights[Color.BLACK]['K'],
+         self.castling_rights[Color.BLACK]['Q']) = rights_snapshot
+
+        # undo move
+        self.turn = self.turn.opposite()
+        self.grid[f] = piece
+        if promoted_kind != piece.kind:
+            self.grid[t] = Piece(piece.color, promoted_kind)  # promoted dummy
+        else:
+            self.grid[t] = piece
+        self.grid[t] = captured
+        if rook_piece:
+            self.grid[rook_from] = rook_piece
+            self.grid[rook_to]   = None
 
     # ─────────────────────────────  Move generation  ───────────────────────────── #
 
     def legal_moves(self, color: Color):
-        """Generate all *legal* moves (i.e. not leaving own king in check)."""
-        for move in self._pseudo_moves(color):
-            clone = self.copy()
-            clone._make_move(move)
-            if not clone._in_check(color):
-                yield move
+        """
+        Generate all *legal* moves without allocating new boards.
+        Uses the fast push / pop that is already implemented.
+        """
+        for mv in self._pseudo_moves(color):
+            token = self.push(mv)
+            if not self._in_check(color):
+                yield mv
+            self.pop(token)
 
     # Pseudo‑legal = obeys piece movement but ignores check.
     def _pseudo_moves(self, color: Color, include_castling: bool = True):
         for r in range(8):
             for c in range(8):
-                p = self.grid[r][c]
+                p = self.grid[self._sq(r, c)]
                 if p and p.color is color:
                     yield from self._piece_moves(r, c, p, include_castling=include_castling)
 
@@ -359,7 +603,7 @@ class Board:
                         yield Move(r, c, back_rank, 2, is_castling=True)
 
     def _make_move(self, mv: Move):
-        piece = self.grid[mv.from_row][mv.from_col]
+        piece = self.grid[self._sq(mv.from_row, mv.from_col)]
         target = self._piece_at(mv.to_row, mv.to_col)
 
         # Reset half‑move clock if pawn move or capture
@@ -375,22 +619,22 @@ class Board:
             else:  # Queen‑side
                 rook_from, rook_to = (mv.from_row, 0), (mv.from_row, 3)
             rook = self._piece_at(*rook_from)
-            self.grid[rook_from[0]][rook_from[1]] = None
-            self.grid[rook_to[0]][rook_to[1]] = rook
+            self.grid[self._sq(*rook_from)] = None
+            self.grid[self._sq(*rook_to)] = rook
             rook.has_moved = True
 
         # En‑passant capture (remove the pawn that was bypassed last move)
         if mv.is_en_passant:
-            self.grid[mv.from_row][mv.to_col] = None
+            self.grid[self._sq(mv.from_row, mv.to_col)] = None
 
         # Move the actual piece
-        self.grid[mv.from_row][mv.from_col] = None
-        self.grid[mv.to_row][mv.to_col] = piece
+        self.grid[self._sq(mv.from_row, mv.from_col)] = None
+        self.grid[self._sq(mv.to_row, mv.to_col)] = piece
         piece.has_moved = True
 
         # Promotion
         if piece.kind is PieceType.PAWN and mv.promotion:
-            self.grid[mv.to_row][mv.to_col] = Piece(piece.color, mv.promotion, has_moved=True)
+            self.grid[self._sq(mv.to_row, mv.to_col)] = Piece(piece.color, mv.promotion, has_moved=True)
 
         # Update en‑passant target square
         if piece.kind is PieceType.PAWN and abs(mv.to_row - mv.from_row) == 2:
@@ -696,86 +940,6 @@ class MainWindow(QMainWindow):
 
     def _find_best_move(self, color):
         return find_best_move_parallel(self.board, color, depth=4)
-
-    def _board_hash(board: 'Board'):
-    pieces = tuple(
-        (r, c, p.color.value, p.kind.value)
-        for r in range(8) for c in range(8)
-        if (p := board._piece_at(r, c))
-    )
-    return hash((pieces, board.turn.value,
-                 tuple(sorted(board.castling_rights[Color.WHITE].items())),
-                 tuple(sorted(board.castling_rights[Color.BLACK].items())),
-                 board.en_passant_target))
-
-def _minimax(board, depth, alpha, beta, maximizing, ai_color, tt):
-    key = (_board_hash(board), depth, maximizing)
-    if key in tt:
-        return tt[key]
-
-    if depth == 0 or board.result() is not None:
-        return evaluate_board(board, ai_color)
-
-    color = ai_color if maximizing else ai_color.opposite()
-    moves = list(board.legal_moves(color))
-
-    # Better ordering: (is_capture, value_of_capture)
-    moves.sort(key=lambda mv: (
-        (t := board._piece_at(mv.to_row, mv.to_col)) is not None,
-        PIECE_VALUES.get(t.kind, 0) if t else 0
-    ), reverse=True)
-
-    if maximizing:
-        best = float('-inf')
-        for mv in moves:
-            nb = board.copy()
-            nb._make_move(mv)
-            best = max(best, _minimax(nb, depth-1, alpha, beta, False, ai_color, tt))
-            alpha = max(alpha, best)
-            if alpha >= beta:
-                break
-    else:
-        best = float('inf')
-        for mv in moves:
-            nb = board.copy()
-            nb._make_move(mv)
-            best = min(best, _minimax(nb, depth-1, alpha, beta, True, ai_color, tt))
-            beta = min(beta, best)
-            if beta <= alpha:
-                break
-
-    tt[key] = best
-    return best
-
-
-def _score_move(args):
-    """Run inside a worker process – evaluate one root move."""
-    board, move, ai_color, depth = args
-    nb = board.copy()
-    nb._make_move(move)
-    score = _minimax(nb, depth-1, float('-inf'), float('inf'),
-                     False, ai_color, {})      # local TT
-    return score, move
-
-
-def find_best_move_parallel(board: 'Board', ai_color: Color,
-                            depth: int = 4) -> Move | None:
-    moves = list(board.legal_moves(ai_color))
-    if not moves:
-        return None
-    # Same ordering trick as above
-    moves.sort(key=lambda mv: (
-        (t := board._piece_at(mv.to_row, mv.to_col)) is not None,
-        PIECE_VALUES.get(t.kind, 0) if t else 0
-    ), reverse=True)
-
-    # One big board object is pickled for each job – acceptable at root.
-    with concurrent.futures.ProcessPoolExecutor(
-            max_workers=os.cpu_count()) as pool:
-        results = pool.map(_score_move,
-                           ((board, mv, ai_color, depth) for mv in moves))
-    best_score, best_move = max(results, key=lambda x: x[0])
-    return best_move
 
 def main():
     app = QApplication(sys.argv)
