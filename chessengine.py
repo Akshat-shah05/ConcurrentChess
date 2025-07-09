@@ -831,12 +831,31 @@ class GameSetupDialog(QDialog):
         self.rb_ai.toggled.connect(update_color_enabled)
         update_color_enabled()
 
+        # Time Selection
+        time_group = QGroupBox("Time Control")
+        time_layout = QVBoxLayout()
+        self.cb_time = QComboBox()
+        self.cb_time.addItems(["30 seconds", "1 minutes", "3 minutes", "5 minutes", "10 minutes"])
+        time_layout.addWidget(self.cb_time)
+        # Increment selection
+        self.cb_increment = QComboBox()
+        self.cb_increment.addItems(["+0s", "+1s", "+2s", "+5s"])
+        time_layout.addWidget(self.cb_increment)
+        time_group.setLayout(time_layout)
+        layout.addWidget(time_group)
+
+        # Enable/disable time selection based on mode
+        def update_time_enabled():
+            time_group.setEnabled(not self.rb_ai.isChecked())
+        self.rb_ai.toggled.connect(update_time_enabled)
+        update_time_enabled()
+
         # OK/Cancel buttons
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
-
+        
     @property
     def mode(self):
         return "ai" if self.rb_ai.isChecked() else "2p"
@@ -844,6 +863,19 @@ class GameSetupDialog(QDialog):
     @property
     def color(self):
         return Color.WHITE if self.rb_white.isChecked() else Color.BLACK
+
+    @property
+    def time_seconds(self):
+        # Map combo box selection to seconds
+        idx = self.cb_time.currentIndex()
+        options = [30, 60, 180, 300, 600]
+        return options[idx] if 0 <= idx < len(options) else 60
+
+    @property
+    def time_increment(self):
+        idx = self.cb_increment.currentIndex()
+        options = [0, 1, 2, 5]
+        return options[idx] if 0 <= idx < len(options) else 0
 
 # Place BoardWidget here, before MainWindow
 class BoardWidget(QWidget):
@@ -950,6 +982,12 @@ class BoardWidget(QWidget):
                     elif mv.promotion and self.board.turn is Color.BLACK:
                         mv.promotion = PieceType.QUEEN  # auto‑queen for black to simplify UI
                     self.board._make_move(mv)
+                    # Add increment after move in 2P mode
+                    mw = self.parentWidget()
+                    while mw and not isinstance(mw, MainWindow):
+                        mw = mw.parentWidget()
+                    if mw and hasattr(mw, '_increment_clock') and mw.mode == "2p":
+                        mw._increment_clock(self.board.turn.opposite())
                     break
             self.selected, self.candidates = None, []
             self.update()
@@ -1021,11 +1059,30 @@ class MainWindow(QMainWindow):
         self.board = Board()
         self.view = BoardWidget(self.board)
         self.evalbar = EvalBarWidget(self.board)
-        # Layout: board and eval bar side by side
+        # Chess clocks (5 minutes per player)
+        self.white_time = 0.5 * 60.0  # seconds
+        self.black_time = 0.5 * 60.0
+        self.clock_running = False
+        self.last_clock_update = None
+        # Clock labels
+        self.white_clock_label = QLabel(self._format_time(self.white_time))
+        self.black_clock_label = QLabel(self._format_time(self.black_time))
+        font = QFont()
+        font.setPointSize(16)
+        font.setBold(True)
+        self.white_clock_label.setFont(font)
+        self.black_clock_label.setFont(font)
+        self.white_clock_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.black_clock_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Layout: clocks and board/eval bar
         central = QWidget()
-        layout = QHBoxLayout(central)
-        layout.addWidget(self.view)
-        layout.addWidget(self.evalbar)
+        vlayout = QVBoxLayout(central)
+        vlayout.addWidget(self.black_clock_label)
+        hlayout = QHBoxLayout()
+        hlayout.addWidget(self.view)
+        hlayout.addWidget(self.evalbar)
+        vlayout.addLayout(hlayout)
+        vlayout.addWidget(self.white_clock_label)
         self.setCentralWidget(central)
         self.status = QLabel()
         self.statusBar().addPermanentWidget(self.status)
@@ -1045,6 +1102,11 @@ class MainWindow(QMainWindow):
         timer_eval = QTimer(self)
         timer_eval.timeout.connect(self._refresh_evalbar)
         timer_eval.start(300)
+        # Chess clock timer
+        self.clock_timer = QTimer(self)
+        self.clock_timer.timeout.connect(self._update_clocks)
+        self.clock_timer.start(100)
+        self.last_clock_update = QTimer().remainingTime()
 
     def _choose_mode_and_color(self):
         dlg = GameSetupDialog(self)
@@ -1053,15 +1115,26 @@ class MainWindow(QMainWindow):
             if self.mode == "ai":
                 self.ai_color = dlg.color
                 self.board.turn = Color.WHITE if self.ai_color == Color.BLACK else Color.WHITE
+                self.white_time = 0.5 * 60.0
+                self.black_time = 0.5 * 60.0
+                self.time_increment = 0
             else:
                 self.ai_color = None
+                t = dlg.time_seconds
+                self.white_time = t
+                self.black_time = t
+                self.time_increment = dlg.time_increment
+                self.white_clock_label.setText(self._format_time(self.white_time))
+                self.black_clock_label.setText(self._format_time(self.black_time))
         else:
             self.mode = "2p"
             self.ai_color = None
+            self.time_increment = 0
 
     def _refresh_status(self):
         if res := self.board.result():
             self.status.setText(res)
+            self.clock_timer.stop()
         else:
             self.status.setText(f"{'White' if self.board.turn is Color.WHITE else 'Black'} to move")
 
@@ -1097,6 +1170,44 @@ class MainWindow(QMainWindow):
         except Exception:
             val = 0.0
         self.evalbar.set_eval(val)
+
+    def _format_time(self, t):
+        t = max(0, int(t))
+        m, s = divmod(t, 60)
+        return f"{m:02}:{s:02}"
+
+    def _update_clocks(self):
+        if self.mode != "2p":
+            return
+        dt = 0.1  # seconds per tick
+        if self.board.turn is Color.WHITE:
+            self.white_time -= dt
+            if self.white_time <= 0:
+                self.white_time = 0
+                self._end_game_on_time(Color.WHITE)
+        else:
+            self.black_time -= dt
+            if self.black_time <= 0:
+                self.black_time = 0
+                self._end_game_on_time(Color.BLACK)
+        self.white_clock_label.setText(self._format_time(self.white_time))
+        self.black_clock_label.setText(self._format_time(self.black_time))
+
+    def _increment_clock(self, color):
+        if self.mode != "2p":
+            return
+        if color is Color.WHITE:
+            self.white_time += self.time_increment
+            self.white_clock_label.setText(self._format_time(self.white_time))
+        else:
+            self.black_time += self.time_increment
+            self.black_clock_label.setText(self._format_time(self.black_time))
+
+    def _end_game_on_time(self, color):
+        winner = "Black" if color is Color.WHITE else "White"
+        QMessageBox.information(self, "Time Out", f"{winner} wins on time!")
+        # Optionally, stop the clock
+        self.clock_timer.stop()
 
 def main():
     app = QApplication(sys.argv)
