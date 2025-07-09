@@ -207,8 +207,22 @@ class Board:
         return self.grid[r][c] if self._in_bounds(r, c) else None
 
     def copy(self):
-        """Deep copy so we can test moves without mutating original state."""
-        return deepcopy(self)
+        clone = Board.__new__(Board)          # bypass __init__
+        clone.turn               = self.turn
+        clone.en_passant_target  = self.en_passant_target
+        clone.castling_rights    = {
+            Color.WHITE: self.castling_rights[Color.WHITE].copy(),
+            Color.BLACK: self.castling_rights[Color.BLACK].copy()
+        }
+        clone.halfmove_clock     = self.halfmove_clock
+        clone.fullmove_number    = self.fullmove_number
+        # copy grid & Piece objects
+        clone.grid = [
+            [None if p is None else Piece(p.color, p.kind, p.has_moved)
+             for p in row]
+            for row in self.grid
+        ]
+        return clone
 
     def _setup_initial_position(self):
         # Pawns
@@ -681,81 +695,87 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(100, self._check_ai_move_done)
 
     def _find_best_move(self, color):
-        self._trans_table.clear()  # Clear transposition table for each new root search
-        # Use minimax with alpha-beta pruning
-        depth = 3 # You can increase for more strength
-        best_score = float('-inf')
-        best_move = None
-        board = self.board
-        moves = list(board.legal_moves(color))
-        # Move ordering: captures first
-        def move_score(mv):
-            target = board._piece_at(mv.to_row, mv.to_col)
-            return (target is not None, PIECE_VALUES[target.kind] if target else 0)
-        moves.sort(key=move_score, reverse=True)
-        for move in moves:
-            clone = board.copy()
-            clone._make_move(move)
-            score = self._minimax(clone, depth - 1, float('-inf'), float('inf'), False, color)
-            if score > best_score:
-                best_score = score
-                best_move = move
-        return best_move
+        return find_best_move_parallel(self.board, color, depth=4)
 
-    def _board_hash(self, board):
-        # Hash based on piece positions, turn, castling rights, en passant
-        pieces = tuple(
-            (r, c, p.color.value, p.kind.value)
-            for r in range(8) for c in range(8)
-            if (p := board._piece_at(r, c))
-        )
-        turn = board.turn.value
-        cr = tuple(
-            (color.value, tuple(sorted(board.castling_rights[color].items())))
-            for color in (Color.WHITE, Color.BLACK)
-        )
-        ep = board.en_passant_target
-        return hash((pieces, turn, cr, ep))
+    def _board_hash(board: 'Board'):
+    pieces = tuple(
+        (r, c, p.color.value, p.kind.value)
+        for r in range(8) for c in range(8)
+        if (p := board._piece_at(r, c))
+    )
+    return hash((pieces, board.turn.value,
+                 tuple(sorted(board.castling_rights[Color.WHITE].items())),
+                 tuple(sorted(board.castling_rights[Color.BLACK].items())),
+                 board.en_passant_target))
 
-    def _minimax(self, board, depth, alpha, beta, maximizing, ai_color):
-        h = self._board_hash(board)
-        if h in self._trans_table:
-            cached_depth, cached_score = self._trans_table[h]
-            if cached_depth >= depth:
-                return cached_score
-        if depth == 0 or board.result() is not None:
-            return evaluate_board(board, ai_color)
-        color = ai_color if maximizing else ai_color.opposite()
-        moves = list(board.legal_moves(color))
-        # Move ordering: captures first
-        def move_score(mv):
-            target = board._piece_at(mv.to_row, mv.to_col)
-            return (target is not None, PIECE_VALUES[target.kind] if target else 0)
-        moves.sort(key=move_score, reverse=True)
-        if not moves:
-            return evaluate_board(board, ai_color)
-        if maximizing:
-            value = float('-inf')
-            for move in moves:
-                clone = board.copy()
-                clone._make_move(move)
-                value = max(value, self._minimax(clone, depth - 1, alpha, beta, False, ai_color))
-                alpha = max(alpha, value)
-                if alpha >= beta:
-                    break
-            self._trans_table[h] = (depth, value)
-            return value
-        else:
-            value = float('inf')
-            for move in moves:
-                clone = board.copy()
-                clone._make_move(move)
-                value = min(value, self._minimax(clone, depth - 1, alpha, beta, True, ai_color))
-                beta = min(beta, value)
-                if beta <= alpha:
-                    break
-            self._trans_table[h] = (depth, value)
-            return value
+def _minimax(board, depth, alpha, beta, maximizing, ai_color, tt):
+    key = (_board_hash(board), depth, maximizing)
+    if key in tt:
+        return tt[key]
+
+    if depth == 0 or board.result() is not None:
+        return evaluate_board(board, ai_color)
+
+    color = ai_color if maximizing else ai_color.opposite()
+    moves = list(board.legal_moves(color))
+
+    # Better ordering: (is_capture, value_of_capture)
+    moves.sort(key=lambda mv: (
+        (t := board._piece_at(mv.to_row, mv.to_col)) is not None,
+        PIECE_VALUES.get(t.kind, 0) if t else 0
+    ), reverse=True)
+
+    if maximizing:
+        best = float('-inf')
+        for mv in moves:
+            nb = board.copy()
+            nb._make_move(mv)
+            best = max(best, _minimax(nb, depth-1, alpha, beta, False, ai_color, tt))
+            alpha = max(alpha, best)
+            if alpha >= beta:
+                break
+    else:
+        best = float('inf')
+        for mv in moves:
+            nb = board.copy()
+            nb._make_move(mv)
+            best = min(best, _minimax(nb, depth-1, alpha, beta, True, ai_color, tt))
+            beta = min(beta, best)
+            if beta <= alpha:
+                break
+
+    tt[key] = best
+    return best
+
+
+def _score_move(args):
+    """Run inside a worker process – evaluate one root move."""
+    board, move, ai_color, depth = args
+    nb = board.copy()
+    nb._make_move(move)
+    score = _minimax(nb, depth-1, float('-inf'), float('inf'),
+                     False, ai_color, {})      # local TT
+    return score, move
+
+
+def find_best_move_parallel(board: 'Board', ai_color: Color,
+                            depth: int = 4) -> Move | None:
+    moves = list(board.legal_moves(ai_color))
+    if not moves:
+        return None
+    # Same ordering trick as above
+    moves.sort(key=lambda mv: (
+        (t := board._piece_at(mv.to_row, mv.to_col)) is not None,
+        PIECE_VALUES.get(t.kind, 0) if t else 0
+    ), reverse=True)
+
+    # One big board object is pickled for each job – acceptable at root.
+    with concurrent.futures.ProcessPoolExecutor(
+            max_workers=os.cpu_count()) as pool:
+        results = pool.map(_score_move,
+                           ((board, mv, ai_color, depth) for mv in moves))
+    best_score, best_move = max(results, key=lambda x: x[0])
+    return best_move
 
 def main():
     app = QApplication(sys.argv)
@@ -765,4 +785,6 @@ def main():
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
+    multiprocessing.set_start_method("spawn", force=True)
     main()
