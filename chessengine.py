@@ -3,10 +3,11 @@ import sys
 from enum import Enum
 from dataclasses import dataclass
 from copy import deepcopy
+import concurrent.futures
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QMessageBox,
-    QDialog, QDialogButtonBox, QVBoxLayout, QPushButton
+    QDialog, QDialogButtonBox, QVBoxLayout, QPushButton, QComboBox
 )
 from PyQt6.QtGui import QPainter, QColor, QFont
 from PyQt6.QtCore import Qt, QSize, QPoint, QTimer
@@ -66,6 +67,124 @@ class Move:
         cols = "abcdefgh"
         return f"{cols[self.from_col]}{8 - self.from_row}→{cols[self.to_col]}{8 - self.to_row}"
 
+
+# Piece values
+PIECE_VALUES = {
+    PieceType.PAWN: 100,
+    PieceType.KNIGHT: 320,
+    PieceType.BISHOP: 330,
+    PieceType.ROOK: 500,
+    PieceType.QUEEN: 900,
+    PieceType.KING: 0,  # King value is not used directly
+}
+
+# Piece-square tables (from White's perspective, 8x8)
+# Values from https://www.chessprogramming.org/Simplified_Evaluation_Function
+PAWN_TABLE = [
+      0,   0,   0,   0,   0,   0,   0,   0,
+     50,  50,  50,  50,  50,  50,  50,  50,
+     10,  10,  20,  30,  30,  20,  10,  10,
+      5,   5,  10,  25,  25,  10,   5,   5,
+      0,   0,   0,  20,  20,   0,   0,   0,
+      5,  -5, -10,   0,   0, -10,  -5,   5,
+      5,  10,  10, -20, -20,  10,  10,   5,
+      0,   0,   0,   0,   0,   0,   0,   0
+]
+KNIGHT_TABLE = [
+    -50, -40, -30, -30, -30, -30, -40, -50,
+    -40, -20,   0,   0,   0,   0, -20, -40,
+    -30,   0,  10,  15,  15,  10,   0, -30,
+    -30,   5,  15,  20,  20,  15,   5, -30,
+    -30,   0,  15,  20,  20,  15,   0, -30,
+    -30,   5,  10,  15,  15,  10,   5, -30,
+    -40, -20,   0,   5,   5,   0, -20, -40,
+    -50, -40, -30, -30, -30, -30, -40, -50
+]
+BISHOP_TABLE = [
+    -20, -10, -10, -10, -10, -10, -10, -20,
+    -10,   0,   0,   0,   0,   0,   0, -10,
+    -10,   0,   5,  10,  10,   5,   0, -10,
+    -10,   5,   5,  10,  10,   5,   5, -10,
+    -10,   0,  10,  10,  10,  10,   0, -10,
+    -10,  10,  10,  10,  10,  10,  10, -10,
+    -10,   5,   0,   0,   0,   0,   5, -10,
+    -20, -10, -10, -10, -10, -10, -10, -20
+]
+ROOK_TABLE = [
+      0,   0,   0,   0,   0,   0,   0,   0,
+      5,  10,  10,  10,  10,  10,  10,   5,
+     -5,   0,   0,   0,   0,   0,   0,  -5,
+     -5,   0,   0,   0,   0,   0,   0,  -5,
+     -5,   0,   0,   0,   0,   0,   0,  -5,
+     -5,   0,   0,   0,   0,   0,   0,  -5,
+     -5,   0,   0,   0,   0,   0,   0,  -5,
+      0,   0,   0,   5,   5,   0,   0,   0
+]
+QUEEN_TABLE = [
+    -20, -10, -10,  -5,  -5, -10, -10, -20,
+    -10,   0,   0,   0,   0,   0,   0, -10,
+    -10,   0,   5,   5,   5,   5,   0, -10,
+     -5,   0,   5,   5,   5,   5,   0,  -5,
+      0,   0,   5,   5,   5,   5,   0,  -5,
+    -10,   5,   5,   5,   5,   5,   0, -10,
+    -10,   0,   5,   0,   0,   0,   0, -10,
+    -20, -10, -10,  -5,  -5, -10, -10, -20
+]
+KING_TABLE_MID = [
+    -30, -40, -40, -50, -50, -40, -40, -30,
+    -30, -40, -40, -50, -50, -40, -40, -30,
+    -30, -40, -40, -50, -50, -40, -40, -30,
+    -30, -40, -40, -50, -50, -40, -40, -30,
+    -20, -30, -30, -40, -40, -30, -30, -20,
+    -10, -20, -20, -20, -20, -20, -20, -10,
+     20,  20,   0,   0,   0,   0,  20,  20,
+     20,  30,  10,   0,   0,  10,  30,  20
+]
+KING_TABLE_END = [
+    -50, -40, -30, -20, -20, -30, -40, -50,
+    -30, -20, -10,   0,   0, -10, -20, -30,
+    -30, -10,  20,  30,  30,  20, -10, -30,
+    -30, -10,  30,  40,  40,  30, -10, -30,
+    -30, -10,  30,  40,  40,  30, -10, -30,
+    -30, -10,  20,  30,  30,  20, -10, -30,
+    -30, -30,   0,   0,   0,   0, -30, -30,
+    -50, -30, -30, -30, -30, -30, -30, -50
+]
+
+PIECE_SQUARE_TABLES = {
+    PieceType.PAWN: PAWN_TABLE,
+    PieceType.KNIGHT: KNIGHT_TABLE,
+    PieceType.BISHOP: BISHOP_TABLE,
+    PieceType.ROOK: ROOK_TABLE,
+    PieceType.QUEEN: QUEEN_TABLE,
+    PieceType.KING: KING_TABLE_MID,  # For simplicity, use midgame table always
+}
+
+def evaluate_board(board: 'Board', color: Color) -> int:
+    """
+    Evaluate the board from the perspective of 'color'.
+    Positive = good for 'color', negative = good for opponent.
+    """
+    score = 0
+    for r in range(8):
+        for c in range(8):
+            p = board._piece_at(r, c)
+            if not p:
+                continue
+            value = PIECE_VALUES[p.kind]
+            # Piece-square table: flip for black
+            pst = PIECE_SQUARE_TABLES[p.kind]
+            idx = r * 8 + c if p.color == Color.WHITE else (7 - r) * 8 + c
+            value += pst[idx]
+            if p.color == color:
+                score += value
+            else:
+                score -= value
+    # Mobility
+    my_moves = len(list(board.legal_moves(color)))
+    opp_moves = len(list(board.legal_moves(color.opposite())))
+    score += 5 * (my_moves - opp_moves)
+    return score
 
 class Board:
     """Holds the full game state and implements move‑generation/validation."""
@@ -349,6 +468,12 @@ class BoardWidget(QWidget):
                                 UNICODE_PIECES[(piece.color, piece.kind)])
 
     def mousePressEvent(self, evt):
+        # Block input if AI is thinking
+        mw = self.parentWidget()
+        while mw and not isinstance(mw, MainWindow):
+            mw = mw.parentWidget()
+        if mw and getattr(mw, '_ai_thinking', False):
+            return
         c = int(evt.position().x()) // self.square
         r = int(evt.position().y()) // self.square
         if not Board._in_bounds(r, c):
@@ -391,6 +516,38 @@ class BoardWidget(QWidget):
         return choice.get("p", PieceType.QUEEN)
 
 
+class ModeDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Choose Game Mode")
+        layout = QVBoxLayout(self)
+        self.mode = None
+        btn2p = QPushButton("Two Player")
+        btnai = QPushButton("Play vs AI")
+        layout.addWidget(btn2p)
+        layout.addWidget(btnai)
+        btn2p.clicked.connect(lambda: self._choose("2p"))
+        btnai.clicked.connect(lambda: self._choose("ai"))
+    def _choose(self, mode):
+        self.mode = mode
+        self.accept()
+
+class ColorDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Choose Your Color")
+        layout = QVBoxLayout(self)
+        self.color = None
+        btnw = QPushButton("White")
+        btnb = QPushButton("Black")
+        layout.addWidget(btnw)
+        layout.addWidget(btnb)
+        btnw.clicked.connect(lambda: self._choose(Color.WHITE))
+        btnb.clicked.connect(lambda: self._choose(Color.BLACK))
+    def _choose(self, color):
+        self.color = color
+        self.accept()
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -400,17 +557,134 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.view)
         self.status = QLabel()
         self.statusBar().addPermanentWidget(self.status)
-
-        # Periodically refresh status bar
+        self.mode = "2p"  # default
+        self.ai_color = None
+        self._choose_mode_and_color()
+        self._ai_thinking = False
+        self._ai_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self._ai_future = None
+        self._trans_table = {}
+        # Periodically refresh status bar and check for AI move
         timer = QTimer(self)
         timer.timeout.connect(self._refresh_status)
+        timer.timeout.connect(self._maybe_do_ai_move)
         timer.start(200)
+
+    def _choose_mode_and_color(self):
+        dlg = ModeDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.mode = dlg.mode
+        if self.mode == "ai":
+            cdlg = ColorDialog(self)
+            if cdlg.exec() == QDialog.DialogCode.Accepted:
+                self.ai_color = cdlg.color
+                self.board.turn = Color.WHITE if self.ai_color == Color.BLACK else Color.WHITE
+            else:
+                self.ai_color = Color.BLACK  # fallback
+        else:
+            self.ai_color = None
 
     def _refresh_status(self):
         if res := self.board.result():
             self.status.setText(res)
         else:
             self.status.setText(f"{'White' if self.board.turn is Color.WHITE else 'Black'} to move")
+
+    def _maybe_do_ai_move(self):
+        if self.mode == "ai" and self.board.turn == self.ai_color and not self._ai_thinking and not self.board.result():
+            self._ai_thinking = True
+            # Start AI move in a background thread
+            self._ai_future = self._ai_executor.submit(self._find_best_move, self.ai_color)
+            QTimer.singleShot(100, self._check_ai_move_done)
+
+    def _check_ai_move_done(self):
+        if self._ai_future is None:
+            return
+        if self._ai_future.done():
+            move = self._ai_future.result()
+            if move:
+                self.board._make_move(move)
+                self.view.selected = None
+                self.view.candidates = []
+                self.view.update()
+            self._ai_thinking = False
+            self._ai_future = None
+        else:
+            QTimer.singleShot(100, self._check_ai_move_done)
+
+    def _find_best_move(self, color):
+        self._trans_table.clear()  # Clear transposition table for each new root search
+        # Use minimax with alpha-beta pruning
+        depth = 3 # You can increase for more strength
+        best_score = float('-inf')
+        best_move = None
+        board = self.board
+        moves = list(board.legal_moves(color))
+        # Move ordering: captures first
+        def move_score(mv):
+            target = board._piece_at(mv.to_row, mv.to_col)
+            return (target is not None, PIECE_VALUES[target.kind] if target else 0)
+        moves.sort(key=move_score, reverse=True)
+        for move in moves:
+            clone = board.copy()
+            clone._make_move(move)
+            score = self._minimax(clone, depth - 1, float('-inf'), float('inf'), False, color)
+            if score > best_score:
+                best_score = score
+                best_move = move
+        return best_move
+
+    def _board_hash(self, board):
+        # Hash based on piece positions, turn, castling rights, en passant
+        pieces = tuple(
+            (r, c, p.color.value, p.kind.value)
+            for r in range(8) for c in range(8)
+            if (p := board._piece_at(r, c))
+        )
+        turn = board.turn.value
+        cr = tuple((color.value, dict(board.castling_rights[color])) for color in (Color.WHITE, Color.BLACK))
+        ep = board.en_passant_target
+        return hash((pieces, turn, cr, ep))
+
+    def _minimax(self, board, depth, alpha, beta, maximizing, ai_color):
+        h = self._board_hash(board)
+        if h in self._trans_table:
+            cached_depth, cached_score = self._trans_table[h]
+            if cached_depth >= depth:
+                return cached_score
+        if depth == 0 or board.result() is not None:
+            return evaluate_board(board, ai_color)
+        color = ai_color if maximizing else ai_color.opposite()
+        moves = list(board.legal_moves(color))
+        # Move ordering: captures first
+        def move_score(mv):
+            target = board._piece_at(mv.to_row, mv.to_col)
+            return (target is not None, PIECE_VALUES[target.kind] if target else 0)
+        moves.sort(key=move_score, reverse=True)
+        if not moves:
+            return evaluate_board(board, ai_color)
+        if maximizing:
+            value = float('-inf')
+            for move in moves:
+                clone = board.copy()
+                clone._make_move(move)
+                value = max(value, self._minimax(clone, depth - 1, alpha, beta, False, ai_color))
+                alpha = max(alpha, value)
+                if alpha >= beta:
+                    break
+            self._trans_table[h] = (depth, value)
+            return value
+        else:
+            value = float('inf')
+            for move in moves:
+                clone = board.copy()
+                clone._make_move(move)
+                value = min(value, self._minimax(clone, depth - 1, alpha, beta, True, ai_color))
+                beta = min(beta, value)
+                if beta <= alpha:
+                    break
+            self._trans_table[h] = (depth, value)
+            return value
 
 def main():
     app = QApplication(sys.argv)
