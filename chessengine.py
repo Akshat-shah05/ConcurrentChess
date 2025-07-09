@@ -161,6 +161,137 @@ PIECE_SQUARE_TABLES = {
     PieceType.KING: KING_TABLE_MID,  # For simplicity, use midgame table always
 }
 
+# ─────────────── Improved static evaluation (centipawns) ─────────────── #
+def _game_phase(board: 'Board') -> float:
+    """0.0 = early mid-game, 1.0 = deep end-game (no majors / few minors)."""
+    phase = 0
+    for p in board.grid:
+        if not p or p.kind is PieceType.PAWN:
+            continue
+        phase += PIECE_VALUES[p.kind]
+    # 40 cp ≈ both queens + one rook = typical transition
+    return max(0.0, min(1.0, 1.0 - phase / 4000))
+
+# helper masks for quick pawn-file tests
+_FILE_MASKS = [ [(sq>>3, sq&7) for sq in range(f, 64, 8)] for f in range(8) ]
+
+def _pawn_structure(board: 'Board', color: Color) -> int:
+    """Isolated / doubled / passed pawns (centipawns, positive = good)."""
+    pawns   = [ sq for sq,p in enumerate(board.grid) if p and p.color==color and p.kind is PieceType.PAWN ]
+    oppside = Color.WHITE if color is Color.BLACK else Color.BLACK
+    score   = 0
+    files   = { sq & 7 for sq in pawns }
+
+    for sq in pawns:
+        file_ = sq & 7
+        rank  = 7 - (sq>>3) if color is Color.WHITE else (sq>>3)
+        # doubled
+        if sum(1 for r,c in _FILE_MASKS[file_] if board.grid[(r<<3)|c]
+               and board.grid[(r<<3)|c].color==color and
+               board.grid[(r<<3)|c].kind is PieceType.PAWN ) > 1:
+            score -= 15
+        # isolated
+        if {file_-1, file_+1}.isdisjoint(files):
+            score -= 15
+        # passed?
+        passed = True
+        for f in (file_-1, file_, file_+1):
+            if not 0<=f<8: continue
+            for r,c in _FILE_MASKS[f]:
+                if (color is Color.WHITE and r < (sq>>3)) or (color is Color.BLACK and r > (sq>>3)):
+                    pp = board.grid[(r<<3)|c]
+                    if pp and pp.color==oppside and pp.kind is PieceType.PAWN:
+                        passed=False; break
+            if not passed: break
+        if passed:
+            score += 20 + rank*5
+    return score
+
+def _count_weighted_mobility(board:'Board', color:Color)->int:
+    w = {PieceType.KNIGHT:4, PieceType.BISHOP:4,
+         PieceType.ROOK:2,    PieceType.QUEEN:1}
+    cnt = 0
+    for mv in board._pseudo_moves(color, include_castling=False):
+        piece = board.grid[board._sq(mv.from_row, mv.from_col)]
+        cnt += w.get(piece.kind,0)
+    return cnt
+
+def _rook_file_bonus(board:'Board', color:Color)->int:
+    bonus = 0
+    opp = color.opposite()
+    for sq,p in enumerate(board.grid):
+        if not p or p.color!=color or p.kind is not PieceType.ROOK: continue
+        file_ = sq & 7
+        has_own_pawn = any( board.grid[(r<<3)|file_] and
+                            board.grid[(r<<3)|file_].color==color and
+                            board.grid[(r<<3)|file_].kind is PieceType.PAWN
+                            for r in range(8))
+        has_opp_pawn = any( board.grid[(r<<3)|file_] and
+                            board.grid[(r<<3)|file_].color==opp and
+                            board.grid[(r<<3)|file_].kind is PieceType.PAWN
+                            for r in range(8))
+        if not has_own_pawn and not has_opp_pawn:
+            bonus += 15      # open
+        elif not has_own_pawn and has_opp_pawn==False:
+            bonus += 7       # semi-open
+    return bonus
+
+def _king_safety(board:'Board', color:Color, phase:float)->int:
+    """Very cheap: pawn shield in front of castling position (only mid-game)."""
+    if phase>0.7:   # in late end-game king safety ≈ 0
+        return 0
+    score = 0
+    back = 7 if color is Color.WHITE else 0
+    front = back-1 if color is Color.WHITE else back+1
+    cols = (6,5,4) if color is Color.WHITE else (1,2,3)  # g,f,e or b,c,d
+    for c in cols:
+        if not any( board.grid[board._sq(r,c)]
+                    and board.grid[board._sq(r,c)].color==color
+                    and board.grid[board._sq(r,c)].kind is PieceType.PAWN
+                    for r in (front,front-1) if 0<=front-1<8 ):
+            score -= 12
+    return score
+
+def evaluate_board(board:'Board', color:Color)->int:
+    """Return static evaluation in centipawns (positive = good for *color*)."""
+    phase = _game_phase(board)      # blend factor 0..1
+
+    mat   = 0
+    pst   = 0
+    counts= {Color.WHITE:{PieceType.BISHOP:0}, Color.BLACK:{PieceType.BISHOP:0}}
+    for sq,p in enumerate(board.grid):
+        if not p: continue
+        sign = 1 if p.color is color else -1
+        mat += sign * PIECE_VALUES[p.kind]
+        table = PIECE_SQUARE_TABLES[p.kind]
+        # king table blend
+        if p.kind is PieceType.KING:
+            mid = table[sq if p.color is Color.WHITE else ((7-(sq>>3))<<3 | (sq & 7))]
+            end = KING_TABLE_END[sq if p.color is Color.WHITE else ((7-(sq>>3))<<3 | (sq & 7))]
+            pst += sign * int( (1-phase)*mid + phase*end )
+        else:
+            idx = sq if p.color is Color.WHITE else ((7-(sq>>3))<<3 | (sq & 7))
+            pst += sign * table[idx]
+        if p.kind is PieceType.BISHOP:
+            counts[p.color][PieceType.BISHOP]+=1
+
+    bishop_pair = 50 * ( (counts[color][PieceType.BISHOP]==2) -
+                         (counts[color.opposite()][PieceType.BISHOP]==2) )
+
+    mobility = (_count_weighted_mobility(board,color) -
+                _count_weighted_mobility(board,color.opposite())) * 3
+
+    pawns = (_pawn_structure(board,color) -
+             _pawn_structure(board,color.opposite()))
+
+    rooks = (_rook_file_bonus(board,color) -
+             _rook_file_bonus(board,color.opposite()))
+
+    ksafety = (_king_safety(board,color,phase) -
+               _king_safety(board,color.opposite(),phase))
+
+    return mat + pst + bishop_pair + mobility + pawns + rooks + ksafety
+
 # ──────────────────────  FAST-ENGINE EXTENSIONS  ────────────────────── #
 import random, ctypes
 RND64 = lambda: random.getrandbits(64)
@@ -194,34 +325,6 @@ def _hash0(grid, turn, rights, ep):
 @functools.lru_cache(maxsize=1_000_000)
 def _eval_hash(h):           #  ≤ 30 ns after the first hit
     return h                 # placeholder – will never be called, only cached
-
-def _count_pseudo(board: 'Board', color: Color) -> int:
-    return sum(1 for _ in board._pseudo_moves(color, include_castling=False))
-
-def evaluate_board(board: 'Board', color: Color) -> int:
-    """
-    Mid-game material + PST + mobility.
-    The lru_cache drops evaluation of repeated hashes to ~0 ns.
-    """
-    h = board._hash
-    cached = _eval_hash(h)
-    if cached is not h:      # abuse 'is' trick to detect a hit
-        return cached
-
-    score = 0
-    for sq, p in enumerate(board.grid):
-        if not p: continue
-        val = PIECE_VALUES[p.kind]
-        pst = PIECE_SQUARE_TABLES[p.kind]
-        idx = sq if p.color is Color.WHITE else ((7-(sq>>3))<<3 | (sq & 7))
-        val += pst[idx]
-        score += val if p.color is color else -val
-
-    # use cheap pseudo-mobility
-    score += 3 * (_count_pseudo(board, color) -
-                  _count_pseudo(board, color.opposite()))
-
-    return score
 
 # --- In-place alpha-beta search ---
 def _search(board: 'Board', depth: int, alpha: int, beta: int,
@@ -874,6 +977,42 @@ class BoardWidget(QWidget):
         dlg.exec()
         return choice.get("p", PieceType.QUEEN)
 
+# --- Evaluation Bar Widget ---
+class EvalBarWidget(QWidget):
+    def __init__(self, board: 'Board', parent=None):
+        super().__init__(parent)
+        self.board = board
+        self.setFixedWidth(32)
+        self.setMinimumHeight(8 * 72 + 32)  # match board height
+        self.eval = 0.0
+        self.setToolTip("Evaluation bar: 0.0")
+
+    def set_eval(self, value: float):
+        self.eval = value
+        self.setToolTip(f"Evaluation: {value:+.2f}")
+        self.update()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        h = self.height()
+        w = self.width()
+        # Clamp eval to [-10, +10] for display
+        eval_clamped = max(-10, min(10, self.eval))
+        # Map eval to bar fill: +10 = all white, -10 = all black, 0 = half
+        frac = 0.5 + 0.5 * (-eval_clamped / 10)
+        white_h = int(h * (1 - frac))
+        black_h = h - white_h
+        # Draw white (top)
+        p.fillRect(0, 0, w, white_h, QColor(240, 240, 240))
+        # Draw black (bottom)
+        p.fillRect(0, white_h, w, black_h, QColor(40, 40, 40))
+        # Draw border
+        p.setPen(QColor(80, 80, 80))
+        p.drawRect(0, 0, w - 1, h - 1)
+        # Optionally, draw a line at the midpoint
+        p.setPen(QColor(120, 120, 120, 80))
+        p.drawLine(0, h // 2, w, h // 2)
+
 # MainWindow comes after BoardWidget
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -881,7 +1020,13 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Python Chess – PyQt6")
         self.board = Board()
         self.view = BoardWidget(self.board)
-        self.setCentralWidget(self.view)
+        self.evalbar = EvalBarWidget(self.board)
+        # Layout: board and eval bar side by side
+        central = QWidget()
+        layout = QHBoxLayout(central)
+        layout.addWidget(self.view)
+        layout.addWidget(self.evalbar)
+        self.setCentralWidget(central)
         self.status = QLabel()
         self.statusBar().addPermanentWidget(self.status)
         self.mode = "2p"  # default
@@ -896,6 +1041,10 @@ class MainWindow(QMainWindow):
         timer.timeout.connect(self._refresh_status)
         timer.timeout.connect(self._maybe_do_ai_move)
         timer.start(200)
+        # Periodically update eval bar
+        timer_eval = QTimer(self)
+        timer_eval.timeout.connect(self._refresh_evalbar)
+        timer_eval.start(300)
 
     def _choose_mode_and_color(self):
         dlg = GameSetupDialog(self)
@@ -940,6 +1089,14 @@ class MainWindow(QMainWindow):
 
     def _find_best_move(self, color):
         return find_best_move_parallel(self.board, color, depth=4)
+
+    def _refresh_evalbar(self):
+        # Show evaluation from white's perspective
+        try:
+            val = evaluate_board(self.board, Color.WHITE) / 100.0
+        except Exception:
+            val = 0.0
+        self.evalbar.set_eval(val)
 
 def main():
     app = QApplication(sys.argv)
