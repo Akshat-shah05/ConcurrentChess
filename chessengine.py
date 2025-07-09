@@ -1074,9 +1074,19 @@ class MainWindow(QMainWindow):
         self.black_clock_label.setFont(font)
         self.white_clock_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.black_clock_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        # Layout: clocks and board/eval bar
+        # New Game button
+        self.new_game_btn = QPushButton("New Game")
+        self.new_game_btn.clicked.connect(self._quit_and_restart)
+        # Quit button
+        self.quit_btn = QPushButton("Quit")
+        self.quit_btn.clicked.connect(QApplication.instance().quit)
+        # Layout: clocks, button, and board/eval bar
         central = QWidget()
         vlayout = QVBoxLayout(central)
+        btn_hlayout = QHBoxLayout()
+        btn_hlayout.addWidget(self.new_game_btn)
+        btn_hlayout.addWidget(self.quit_btn)
+        vlayout.addLayout(btn_hlayout)
         vlayout.addWidget(self.black_clock_label)
         hlayout = QHBoxLayout()
         hlayout.addWidget(self.view)
@@ -1107,6 +1117,11 @@ class MainWindow(QMainWindow):
         self.clock_timer.timeout.connect(self._update_clocks)
         self.clock_timer.start(100)
         self.last_clock_update = QTimer().remainingTime()
+        # Add menu for quitting and restarting
+        menubar = self.menuBar()
+        game_menu = menubar.addMenu("Game")
+        quit_action = game_menu.addAction("Quit and New Game")
+        quit_action.triggered.connect(self._quit_and_restart)
 
     def _choose_mode_and_color(self):
         dlg = GameSetupDialog(self)
@@ -1208,6 +1223,28 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Time Out", f"{winner} wins on time!")
         # Optionally, stop the clock
         self.clock_timer.stop()
+
+    def _quit_and_restart(self):
+        # Stop clocks
+        self.clock_timer.stop()
+        # Reset board and state
+        self.board = Board()
+        self.view.board = self.board
+        self.evalbar.board = self.board
+        self.selected = None
+        self.candidates = []
+        self.white_time = 0.5 * 60.0
+        self.black_time = 0.5 * 60.0
+        self.time_increment = 0
+        self.white_clock_label.setText(self._format_time(self.white_time))
+        self.black_clock_label.setText(self._format_time(self.black_time))
+        self.view.update()
+        self.evalbar.update()
+        self.status.setText("")
+        # Reopen setup dialog
+        self._choose_mode_and_color()
+        # Restart clocks
+        self.clock_timer.start(100)
 
 def main():
     app = QApplication(sys.argv)
