@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { ChessBoard } from '@/components/ChessBoard'
 import { ChessWebSocket } from '@/services/websocket'
 import type { ChessMove, GameState } from '@/types/chess'
-import { RotateCcw, Wifi, WifiOff, Users } from 'lucide-react'
+import { RotateCcw, Wifi, WifiOff, Users, Loader2 } from 'lucide-react'
 
 export function MultiplayerGame() {
   const [gameState, setGameState] = useState<GameState | null>(null)
@@ -13,6 +13,13 @@ export function MultiplayerGame() {
   const [playerColor, setPlayerColor] = useState<'white' | 'black' | null>(null)
   const [opponentConnected, setOpponentConnected] = useState(false)
   const wsRef = useRef<ChessWebSocket | null>(null)
+  const [connecting, setConnecting] = useState(true)
+
+  useEffect(() => {
+    setConnecting(true)
+    const timeout = setTimeout(() => setConnecting(false), 1000)
+    return () => clearTimeout(timeout)
+  }, [])
 
   useEffect(() => {
     initializeWebSocket()
@@ -113,6 +120,17 @@ export function MultiplayerGame() {
   const joinAsBlack = () => {
     setPlayerColor('black')
     setOpponentConnected(true)
+  }
+
+  if (connecting) {
+    return (
+      <div className="text-center">
+        <div className="flex items-center justify-center space-x-2 mb-4">
+          <Wifi className="w-5 h-5 text-blue-600 animate-spin" />
+          <span className="text-blue-600">Connecting to multiplayer server...</span>
+        </div>
+      </div>
+    )
   }
 
   if (!connected) {
