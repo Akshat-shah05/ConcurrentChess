@@ -1,12 +1,22 @@
 import threading
 import socket
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import atexit
 from chess_engine import Board, Color
 from chess_protocol import ChessProtocol, MESSAGE_TYPES
 
 app = FastAPI()
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # --- TCP/IP Socket Server (runs in background) ---
 SOCKET_HOST = '0.0.0.0'
@@ -267,7 +277,8 @@ def create_game():
 def get_game_state(game_id: str):
     """Get the current state of a game."""
     if game_id not in _active_games:
-        return {"error": "Game not found"}, 404
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Game not found")
     
     board = _active_games[game_id]
     return {
@@ -280,7 +291,8 @@ def get_game_state(game_id: str):
 def make_move(game_id: str, move_data: dict):
     """Make a move in a game."""
     if game_id not in _active_games:
-        return {"error": "Game not found"}, 404
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Game not found")
     
     board = _active_games[game_id]
     
@@ -289,7 +301,8 @@ def make_move(game_id: str, move_data: dict):
         legal_moves = list(board.legal_moves(board.turn))
         
         if move not in legal_moves:
-            return {"error": "Illegal move"}, 400
+            from fastapi import HTTPException
+            raise HTTPException(status_code=400, detail="Illegal move")
         
         board._make_move(move)
         result = board.result()
@@ -300,13 +313,15 @@ def make_move(game_id: str, move_data: dict):
             "result": result
         }
     except Exception as e:
-        return {"error": f"Error processing move: {str(e)}"}, 400
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=f"Error processing move: {str(e)}")
 
 @app.get("/api/games/{game_id}/legal_moves")
 def get_legal_moves(game_id: str):
     """Get legal moves for the current position."""
     if game_id not in _active_games:
-        return {"error": "Game not found"}, 404
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Game not found")
     
     board = _active_games[game_id]
     legal_moves = list(board.legal_moves(board.turn))
@@ -320,7 +335,8 @@ def get_legal_moves(game_id: str):
 def get_ai_move(game_id: str, depth: int = 4):
     """Get an AI move for the current position."""
     if game_id not in _active_games:
-        return {"error": "Game not found"}, 404
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Game not found")
     
     board = _active_games[game_id]
     
@@ -339,6 +355,29 @@ def get_ai_move(game_id: str, depth: int = 4):
                 "result": result
             }
         else:
-            return {"error": "No legal moves available"}, 400
+            from fastapi import HTTPException
+            raise HTTPException(status_code=400, detail="No legal moves available")
     except Exception as e:
-        return {"error": f"Error calculating AI move: {str(e)}"}, 500 
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=f"Error calculating AI move: {str(e)}")
+
+@app.get("/api/games/{game_id}/evaluation")
+def get_evaluation(game_id: str):
+    """Get the current board evaluation."""
+    if game_id not in _active_games:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Game not found")
+    
+    board = _active_games[game_id]
+    
+    from chess_engine import evaluate_board
+    
+    try:
+        eval_score = evaluate_board(board, Color.WHITE)
+        return {
+            "game_id": game_id,
+            "evaluation": eval_score / 100.0  # Convert to pawns
+        }
+    except Exception as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=f"Error calculating evaluation: {str(e)}") 
