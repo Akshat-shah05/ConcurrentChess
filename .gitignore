@@ -1,2 +1,34 @@
 venv/
 backend/__pycache__/
+# Python
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.env
+.env.*
+.DS_Store
+# Node
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.next/
+frontend/.turbo/
+# Build
+*.log
+*.lock
+*.tmp
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+# OS
+.DS_Store
+Thumbs.db
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+# Misc
+*.bak
+*.orig
