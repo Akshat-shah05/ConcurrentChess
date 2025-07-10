@@ -20,7 +20,7 @@ export class ChessWebSocket {
 
   private connect() {
     try {
-      this.ws = new WebSocket(`ws://${SOCKET_HOST}:${SOCKET_PORT}`)
+      this.ws = new WebSocket(`ws://${SOCKET_HOST}:${SOCKET_PORT}/ws`)
       
       this.ws.onopen = () => {
         console.log('WebSocket connected')
