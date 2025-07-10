@@ -65,12 +65,16 @@ class ChessProtocol:
                     "kind": piece.kind.value,
                     "has_moved": piece.has_moved
                 })
-        
+        # Convert castling_rights keys to strings
+        castling_rights = {
+            str(color.name).lower(): rights
+            for color, rights in board.castling_rights.items()
+        }
         return {
             "grid": grid,
             "turn": board.turn.value,
             "en_passant_target": board.en_passant_target,
-            "castling_rights": board.castling_rights,
+            "castling_rights": castling_rights,
             "halfmove_clock": board.halfmove_clock,
             "fullmove_number": board.fullmove_number
         }
@@ -91,14 +95,19 @@ class ChessProtocol:
                         has_moved=piece_data["has_moved"]
                     )
                 )
-        
         board.turn = Color(data["turn"])
         board.en_passant_target = data["en_passant_target"]
-        board.castling_rights = data["castling_rights"]
+        # Convert castling_rights keys back to Color enums
+        castling_rights = {}
+        for color_str, rights in data["castling_rights"].items():
+            if color_str == "white":
+                castling_rights[Color.WHITE] = rights
+            elif color_str == "black":
+                castling_rights[Color.BLACK] = rights
+        board.castling_rights = castling_rights
         board.halfmove_clock = data["halfmove_clock"]
         board.fullmove_number = data["fullmove_number"]
         board._hash = _hash0(board.grid, board.turn, board.castling_rights, board.en_passant_target)
-        
         return board
 
 # Message types
