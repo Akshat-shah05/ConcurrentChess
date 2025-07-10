@@ -1,29 +1,20 @@
 #!/bin/bash
 
-# Start the backend server
-echo "Starting backend server..."
-cd backend
-python main.py &
-BACKEND_PID=$!
+# Start REST API backend
+printf "Starting REST API backend on http://localhost:8000 ...\n"
+(cd backend && python -m uvicorn main:app --host 0.0.0.0 --port 8000) &
+REST_PID=$!
 
-# Wait a moment for backend to start
-sleep 3
+# Start WebSocket backend
+printf "Starting WebSocket backend on ws://localhost:8766/ws ...\n"
+(cd backend && python -m uvicorn websocket_server:app --host 0.0.0.0 --port 8766) &
+WS_PID=$!
 
-# Start the frontend server
-echo "Starting frontend server..."
-cd ../frontend
-npm run dev &
+# Start frontend
+printf "Starting frontend dev server ...\n"
+npm --prefix frontend run dev &
 FRONTEND_PID=$!
 
-echo "Servers started!"
-echo "Backend: http://localhost:8000"
-echo "Frontend: http://localhost:3000"
-echo "WebSocket: ws://localhost:8766"
-echo ""
-echo "Press Ctrl+C to stop all servers"
+trap 'kill $REST_PID $WS_PID $FRONTEND_PID' SIGINT
 
-# Wait for interrupt signal
-trap "echo 'Stopping servers...'; kill $BACKEND_PID $FRONTEND_PID; exit" INT
-
-# Keep script running
-wait 
+wait $REST_PID $WS_PID $FRONTEND_PID 
