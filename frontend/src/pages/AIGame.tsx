@@ -219,9 +219,11 @@ export function AIGame() {
               className="border border-gray-300 rounded px-2 py-1 text-sm"
               disabled={aiThinking}
             >
-              <option value={2}>Easy (2)</option>
-              <option value={4}>Medium (4)</option>
-              <option value={6}>Hard (6)</option>
+              <option value={1}>Easy (1)</option>
+              <option value={2}>Medium (2)</option>
+              <option value={3}>Hard (3)</option>
+              <option value={4}>Hardest (4)</option>
+              <option value={5}>Insane (takes forever) (5)</option>
             </select>
           </div>
         </div>
