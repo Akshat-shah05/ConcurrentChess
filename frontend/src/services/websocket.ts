@@ -9,6 +9,7 @@ const SOCKET_PORT = 8766
 export class ChessWebSocket {
   private ws: WebSocket | null = null
   private messageHandlers: Map<string, ((data: any) => void)[]> = new Map()
+  private gameId: string | null = null
 
   constructor() {
     this.connect()
@@ -77,25 +78,43 @@ export class ChessWebSocket {
     }
   }
 
+  // Game management methods
+  public createGame() {
+    this.send({ type: 'create_game' })
+  }
+
+  public getGames() {
+    this.send({ type: 'get_games' })
+  }
+
+  public joinGame(gameId: string) {
+    this.gameId = gameId
+    this.send({ type: 'join', game_id: gameId })
+  }
+
   // Chess-specific methods
-  public getBoardState(gameId: string = 'default') {
+  public getBoardState(gameId: string = this.gameId || 'default') {
     this.send({ type: 'board_state', game_id: gameId })
   }
 
-  public getLegalMoves(gameId: string = 'default') {
+  public getLegalMoves(gameId: string = this.gameId || 'default') {
     this.send({ type: 'legal_moves', game_id: gameId })
   }
 
-  public getEvaluation(gameId: string = 'default') {
+  public getEvaluation(gameId: string = this.gameId || 'default') {
     this.send({ type: 'evaluation', game_id: gameId })
   }
 
-  public makeMove(move: ChessMove, gameId: string = 'default') {
+  public makeMove(move: ChessMove, gameId: string = this.gameId || 'default') {
     this.send({ type: 'move', game_id: gameId, move })
   }
 
-  public getAIMove(depth: number = 4, gameId: string = 'default') {
+  public getAIMove(depth: number = 4, gameId: string = this.gameId || 'default') {
     this.send({ type: 'ai_move', game_id: gameId, depth })
+  }
+
+  public getCurrentGameId(): string | null {
+    return this.gameId
   }
 
   public disconnect() {
@@ -103,5 +122,6 @@ export class ChessWebSocket {
       this.ws.close()
       this.ws = null
     }
+    this.gameId = null
   }
 } 
