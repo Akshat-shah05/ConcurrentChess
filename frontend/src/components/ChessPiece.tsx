@@ -32,6 +32,7 @@ export function ChessPiece({ piece }: ChessPieceProps) {
         alt={`${piece.color} ${piece.kind}`}
         className="w-full h-full object-contain"
         onError={(e) => {
+          console.log('Image failed to load:', imageSrc)
           // Fallback to Unicode symbol if image fails to load
           const target = e.target as HTMLImageElement
           target.style.display = 'none'

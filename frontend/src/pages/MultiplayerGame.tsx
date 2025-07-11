@@ -55,6 +55,7 @@ export function MultiplayerGame() {
       })
 
       wsRef.current.on('legal_moves', (message: any) => {
+        console.log('Received legal moves:', message.moves)
         setLegalMoves(message.moves || [])
       })
 
@@ -66,12 +67,14 @@ export function MultiplayerGame() {
       })
 
       wsRef.current.on('player_assignment', (message: any) => {
+        console.log('Player assigned color:', message.color)
         setPlayerColor(message.color)
         setShowLobby(false)
         setGameStarted(true)
       })
 
       wsRef.current.on('player_joined', (message: any) => {
+        console.log('Player joined:', message)
         setOpponentConnected(true)
         if (message.total_players >= 2) {
           setGameStarted(true)
@@ -79,25 +82,30 @@ export function MultiplayerGame() {
       })
 
       wsRef.current.on('game_started', (message: any) => {
+        console.log('Game started:', message)
         setGameStarted(true)
       })
 
       wsRef.current.on('player_disconnected', (message: any) => {
+        console.log('Player disconnected:', message)
         setOpponentConnected(false)
         setError('Opponent disconnected')
       })
 
       wsRef.current.on('game_created', (message: any) => {
+        console.log('Game created:', message)
         setCurrentGameId(message.game_id)
         // Auto-join the created game
         wsRef.current?.joinGame(message.game_id)
       })
 
       wsRef.current.on('game_list', (message: any) => {
+        console.log('Game list received:', message.games)
         setAvailableGames(message.games || [])
       })
 
       wsRef.current.on('error', (message: any) => {
+        console.error('WebSocket error:', message)
         setError(message.message || 'WebSocket error')
       })
 
@@ -124,12 +132,21 @@ export function MultiplayerGame() {
   }
 
   const handleSquareClick = (row: number, col: number) => {
-    if (!gameState || !connected || !isPlayerTurn()) return
+    if (!gameState || !connected || !isPlayerTurn()) {
+      console.log('Square click ignored:', { row, col, gameState: !!gameState, connected, isPlayerTurn: isPlayerTurn() })
+      return
+    }
 
     const piece = gameState.board.grid[row * 8 + col]
-    if (piece && piece.color === gameState.board.turn) {
+    console.log('Square clicked:', { row, col, piece, playerColor, boardTurn: gameState.board.turn })
+    
+    // In multiplayer, check if the piece belongs to the current player
+    if (piece && piece.color === playerColor) {
+      console.log('Selecting piece:', piece)
       setSelectedSquare([row, col])
       wsRef.current?.getLegalMoves()
+    } else {
+      console.log('Piece not selectable:', { pieceColor: piece?.color, playerColor })
     }
   }
 
@@ -398,6 +415,8 @@ export function MultiplayerGame() {
           onMove={handleMove}
           isPlayerTurn={isPlayerTurn()}
           gameResult={gameState.result}
+          playerColor={playerColor}
+          isMultiplayer={true}
         />
       </div>
 

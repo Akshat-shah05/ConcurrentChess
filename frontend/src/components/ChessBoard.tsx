@@ -11,6 +11,8 @@ interface ChessBoardProps {
   isPlayerTurn: boolean
   gameResult: string | null
   lastMove?: ChessMove | null
+  playerColor?: 'white' | 'black' | null
+  isMultiplayer?: boolean
 }
 
 export function ChessBoard({ 
@@ -21,16 +23,39 @@ export function ChessBoard({
   onMove, 
   isPlayerTurn,
   gameResult,
-  lastMove
+  lastMove,
+  playerColor,
+  isMultiplayer = false
 }: ChessBoardProps) {
   const [promotionMove, setPromotionMove] = useState<ChessMove | null>(null)
 
-  const getSquareClass = (row: number, col: number) => {
-    const isLight = (row + col) % 2 === 0
+  // Determine if board should be flipped (for black player in multiplayer)
+  const shouldFlipBoard = isMultiplayer && playerColor === 'black'
+
+  // Convert display coordinates to board coordinates
+  const getBoardCoordinates = (displayRow: number, displayCol: number) => {
+    if (shouldFlipBoard) {
+      return { row: 7 - displayRow, col: 7 - displayCol }
+    }
+    return { row: displayRow, col: displayCol }
+  }
+
+  // Convert board coordinates to display coordinates
+  const getDisplayCoordinates = (boardRow: number, boardCol: number) => {
+    if (shouldFlipBoard) {
+      return { row: 7 - boardRow, col: 7 - boardCol }
+    }
+    return { row: boardRow, col: boardCol }
+  }
+
+  const getSquareClass = (displayRow: number, displayCol: number) => {
+    const { row: boardRow, col: boardCol } = getBoardCoordinates(displayRow, displayCol)
+    
+    const isLight = (boardRow + boardCol) % 2 === 0
     let className = `chess-square ${isLight ? 'chess-square-light' : 'chess-square-dark'}`
 
     // Highlight selected square
-    if (selectedSquare && selectedSquare[0] === row && selectedSquare[1] === col) {
+    if (selectedSquare && selectedSquare[0] === boardRow && selectedSquare[1] === boardCol) {
       className += ' chess-square-selected'
     }
 
@@ -38,12 +63,12 @@ export function ChessBoard({
     const isLegalMove = legalMoves.some(move => 
       move.from_row === selectedSquare?.[0] && 
       move.from_col === selectedSquare?.[1] && 
-      move.to_row === row && 
-      move.to_col === col
+      move.to_row === boardRow && 
+      move.to_col === boardCol
     )
 
     if (isLegalMove) {
-      const piece = board.grid[row * 8 + col]
+      const piece = board.grid[boardRow * 8 + boardCol]
       if (piece) {
         className += ' chess-square-capture'
       } else {
@@ -53,8 +78,8 @@ export function ChessBoard({
 
     // Highlight last move
     if (lastMove && (
-      (lastMove.from_row === row && lastMove.from_col === col) ||
-      (lastMove.to_row === row && lastMove.to_col === col)
+      (lastMove.from_row === boardRow && lastMove.from_col === boardCol) ||
+      (lastMove.to_row === boardRow && lastMove.to_col === boardCol)
     )) {
       className += ' chess-square-last-move'
     }
@@ -62,18 +87,20 @@ export function ChessBoard({
     return className
   }
 
-  const getPiece = (row: number, col: number): ChessPiece | null => {
-    return board.grid[row * 8 + col]
+  const getPiece = (displayRow: number, displayCol: number): ChessPiece | null => {
+    const { row: boardRow, col: boardCol } = getBoardCoordinates(displayRow, displayCol)
+    return board.grid[boardRow * 8 + boardCol]
   }
 
-  const handleSquareClick = (row: number, col: number) => {
+  const handleSquareClick = (displayRow: number, displayCol: number) => {
     if (gameResult || !isPlayerTurn) return
 
-    const piece = getPiece(row, col)
+    const { row: boardRow, col: boardCol } = getBoardCoordinates(displayRow, displayCol)
+    const piece = getPiece(displayRow, displayCol)
     
     // If clicking on a piece of the current player's color
     if (piece && piece.color === board.turn) {
-      onSquareClick(row, col)
+      onSquareClick(boardRow, boardCol)
       return
     }
 
@@ -82,14 +109,14 @@ export function ChessBoard({
       const move = legalMoves.find(m => 
         m.from_row === selectedSquare[0] && 
         m.from_col === selectedSquare[1] && 
-        m.to_row === row && 
-        m.to_col === col
+        m.to_row === boardRow && 
+        m.to_col === boardCol
       )
 
       if (move) {
         // Check if this is a pawn promotion
-        const fromPiece = getPiece(move.from_row, move.from_col)
-        if (fromPiece?.kind === 'P' && (row === 0 || row === 7)) {
+        const fromPiece = getPiece(selectedSquare[0], selectedSquare[1])
+        if (fromPiece?.kind === 'P' && (boardRow === 0 || boardRow === 7)) {
           setPromotionMove(move)
         } else {
           onMove(move)
@@ -144,11 +171,15 @@ export function ChessBoard({
     const files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
     const ranks = ['8', '7', '6', '5', '4', '3', '2', '1']
 
+    // Adjust coordinates for flipped board
+    const displayFiles = shouldFlipBoard ? [...files].reverse() : files
+    const displayRanks = shouldFlipBoard ? [...ranks].reverse() : ranks
+
     return (
       <>
         {/* File coordinates (bottom) */}
         <div className="flex justify-center mt-2">
-          {files.map((file, index) => (
+          {displayFiles.map((file, index) => (
             <div key={file} className="w-12 md:w-16 lg:w-20 text-center text-sm font-medium text-gray-600">
               {file}
             </div>
@@ -157,7 +188,7 @@ export function ChessBoard({
         
         {/* Rank coordinates (left side) */}
         <div className="absolute left-2 top-0 bottom-0 flex flex-col justify-center">
-          {ranks.map((rank, index) => (
+          {displayRanks.map((rank, index) => (
             <div key={rank} className="h-12 md:h-16 lg:h-20 flex items-center justify-center text-sm font-medium text-gray-600">
               {rank}
             </div>
@@ -165,6 +196,15 @@ export function ChessBoard({
         </div>
       </>
     )
+  }
+
+  // Get turn indicator text
+  const getTurnIndicatorText = () => {
+    if (isMultiplayer) {
+      return isPlayerTurn ? 'Your turn' : 'Opponent\'s turn'
+    } else {
+      return isPlayerTurn ? 'Your turn' : 'AI is thinking...'
+    }
   }
 
   return (
@@ -181,7 +221,7 @@ export function ChessBoard({
         <div className="mb-6 p-4 bg-white rounded-lg shadow-lg border-2 border-gray-200">
           <div className="flex items-center justify-center space-x-3">
             <span className="text-lg font-medium">
-              {isPlayerTurn ? 'Your turn' : 'AI is thinking...'}
+              {getTurnIndicatorText()}
             </span>
             <div className={`w-6 h-6 rounded-full border-2 ${board.turn === 'white' ? 'bg-white border-black' : 'bg-black border-white'}`}></div>
           </div>
@@ -193,30 +233,30 @@ export function ChessBoard({
         {/* Board with coordinates */}
         <div className="border-4 border-chess-dark rounded-lg overflow-hidden shadow-2xl bg-chess-dark">
           <div className="grid grid-cols-8 relative">
-            {Array.from({ length: 8 }, (_, row) =>
-              Array.from({ length: 8 }, (_, col) => {
-                const squareIndex = row * 8 + col
-                const piece = board.grid[squareIndex]
+            {Array.from({ length: 8 }, (_, displayRow) =>
+              Array.from({ length: 8 }, (_, displayCol) => {
+                const piece = getPiece(displayRow, displayCol)
                 
                 return (
                   <div
-                    key={`${row}-${col}`}
-                    className={getSquareClass(row, col)}
-                    onClick={() => handleSquareClick(row, col)}
+                    key={`${displayRow}-${displayCol}`}
+                    className={getSquareClass(displayRow, displayCol)}
+                    onClick={() => handleSquareClick(displayRow, displayCol)}
                   >
                     {piece && (
                       <ChessPieceComponent piece={piece} />
                     )}
                     
                     {/* Move indicators */}
-                    {legalMoves.some(move => 
-                      move.from_row === selectedSquare?.[0] && 
-                      move.from_col === selectedSquare?.[1] && 
-                      move.to_row === row && 
-                      move.to_col === col
-                    ) && (
+                    {legalMoves.some(move => {
+                      const { row: moveRow, col: moveCol } = getBoardCoordinates(displayRow, displayCol)
+                      return move.from_row === selectedSquare?.[0] && 
+                             move.from_col === selectedSquare?.[1] && 
+                             move.to_row === moveRow && 
+                             move.to_col === moveCol
+                    }) && (
                       <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                        {board.grid[squareIndex] ? (
+                        {piece ? (
                           // Capture indicator
                           <div className="w-8 h-8 md:w-10 md:h-10 lg:w-12 lg:h-12 border-4 border-red-500 rounded-full opacity-80"></div>
                         ) : (

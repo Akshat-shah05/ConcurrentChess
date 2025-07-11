@@ -61,7 +61,7 @@ class ChessProtocol:
                 grid.append(None)
             else:
                 grid.append({
-                    "color": piece.color.value,
+                    "color": "white" if piece.color == Color.WHITE else "black",
                     "kind": piece.kind.value,
                     "has_moved": piece.has_moved
                 })
@@ -72,7 +72,7 @@ class ChessProtocol:
         }
         return {
             "grid": grid,
-            "turn": board.turn.value,
+            "turn": "white" if board.turn == Color.WHITE else "black",
             "en_passant_target": board.en_passant_target,
             "castling_rights": castling_rights,
             "halfmove_clock": board.halfmove_clock,
