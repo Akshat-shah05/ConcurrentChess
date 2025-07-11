@@ -2,7 +2,14 @@ import { useState, useEffect, useRef } from 'react'
 import { ChessBoard } from '@/components/ChessBoard'
 import { ChessWebSocket } from '@/services/websocket'
 import type { ChessMove, GameState } from '@/types/chess'
-import { RotateCcw, Wifi, WifiOff, Users, Loader2 } from 'lucide-react'
+import { RotateCcw, Wifi, WifiOff, Users, Loader2, Plus, Play, ArrowLeft } from 'lucide-react'
+
+interface GameInfo {
+  game_id: string
+  players: number
+  max_players: number
+  status: 'waiting' | 'playing'
+}
 
 export function MultiplayerGame() {
   const [gameState, setGameState] = useState<GameState | null>(null)
@@ -12,6 +19,10 @@ export function MultiplayerGame() {
   const [error, setError] = useState<string | null>(null)
   const [playerColor, setPlayerColor] = useState<'white' | 'black' | null>(null)
   const [opponentConnected, setOpponentConnected] = useState(false)
+  const [availableGames, setAvailableGames] = useState<GameInfo[]>([])
+  const [currentGameId, setCurrentGameId] = useState<string | null>(null)
+  const [gameStarted, setGameStarted] = useState(false)
+  const [showLobby, setShowLobby] = useState(true)
   const wsRef = useRef<ChessWebSocket | null>(null)
   const [connecting, setConnecting] = useState(true)
 
@@ -37,7 +48,7 @@ export function MultiplayerGame() {
       // Set up event handlers
       wsRef.current.on('board_state', (message: any) => {
         setGameState({
-          game_id: 'multiplayer',
+          game_id: currentGameId || 'multiplayer',
           board: message.board,
           result: null
         })
@@ -54,6 +65,38 @@ export function MultiplayerGame() {
         } : null)
       })
 
+      wsRef.current.on('player_assignment', (message: any) => {
+        setPlayerColor(message.color)
+        setShowLobby(false)
+        setGameStarted(true)
+      })
+
+      wsRef.current.on('player_joined', (message: any) => {
+        setOpponentConnected(true)
+        if (message.total_players >= 2) {
+          setGameStarted(true)
+        }
+      })
+
+      wsRef.current.on('game_started', (message: any) => {
+        setGameStarted(true)
+      })
+
+      wsRef.current.on('player_disconnected', (message: any) => {
+        setOpponentConnected(false)
+        setError('Opponent disconnected')
+      })
+
+      wsRef.current.on('game_created', (message: any) => {
+        setCurrentGameId(message.game_id)
+        // Auto-join the created game
+        wsRef.current?.joinGame(message.game_id)
+      })
+
+      wsRef.current.on('game_list', (message: any) => {
+        setAvailableGames(message.games || [])
+      })
+
       wsRef.current.on('error', (message: any) => {
         setError(message.message || 'WebSocket error')
       })
@@ -63,8 +106,8 @@ export function MultiplayerGame() {
         if (wsRef.current?.isConnected) {
           setConnected(true)
           setError(null)
-          // Get initial board state
-          wsRef.current?.getBoardState()
+          // Get available games
+          wsRef.current?.getGames()
         } else {
           setConnected(false)
         }
@@ -103,23 +146,41 @@ export function MultiplayerGame() {
     return gameState.board.turn === playerColor
   }
 
+  const createGame = () => {
+    wsRef.current?.createGame()
+  }
+
+  const joinGame = (gameId: string) => {
+    setCurrentGameId(gameId)
+    wsRef.current?.joinGame(gameId)
+  }
+
+  const backToLobby = () => {
+    setShowLobby(true)
+    setGameState(null)
+    setLegalMoves([])
+    setSelectedSquare(null)
+    setError(null)
+    setPlayerColor(null)
+    setCurrentGameId(null)
+    setGameStarted(false)
+    setOpponentConnected(false)
+    wsRef.current?.disconnect()
+    initializeWebSocket()
+  }
+
   const resetGame = () => {
     setGameState(null)
     setLegalMoves([])
     setSelectedSquare(null)
     setError(null)
     setPlayerColor(null)
-    wsRef.current?.getBoardState()
-  }
-
-  const joinAsWhite = () => {
-    setPlayerColor('white')
-    setOpponentConnected(true)
-  }
-
-  const joinAsBlack = () => {
-    setPlayerColor('black')
-    setOpponentConnected(true)
+    setCurrentGameId(null)
+    setGameStarted(false)
+    setOpponentConnected(false)
+    setShowLobby(true)
+    wsRef.current?.disconnect()
+    initializeWebSocket()
   }
 
   if (connecting) {
@@ -152,34 +213,75 @@ export function MultiplayerGame() {
     )
   }
 
-  if (!playerColor) {
+  // Show lobby if not in a game
+  if (showLobby) {
     return (
-      <div className="max-w-2xl mx-auto text-center">
-        <h1 className="text-3xl font-bold text-chess-dark mb-8">Multiplayer Chess</h1>
-        
-        <div className="bg-white rounded-lg shadow-lg p-8">
+      <div className="max-w-4xl mx-auto">
+        <div className="text-center mb-8">
+          <h1 className="text-3xl font-bold text-chess-dark mb-4">Multiplayer Chess</h1>
+          
           <div className="flex items-center justify-center space-x-2 mb-6">
             <Wifi className="w-5 h-5 text-green-600" />
             <span className="text-green-600 font-medium">Connected to server</span>
           </div>
-          
-          <h2 className="text-xl font-semibold mb-6">Choose your color:</h2>
-          
-          <div className="flex justify-center space-x-4">
+        </div>
+
+        <div className="grid md:grid-cols-2 gap-8">
+          {/* Create Game */}
+          <div className="bg-white rounded-lg shadow-lg p-6">
+            <h2 className="text-xl font-semibold mb-4">Create New Game</h2>
+            <p className="text-gray-600 mb-6">
+              Start a new game and wait for another player to join.
+            </p>
             <button
-              onClick={joinAsWhite}
-              className="bg-white text-black border-2 border-black px-8 py-4 rounded-lg font-medium hover:bg-gray-100 transition-colors"
+              onClick={createGame}
+              className="btn-primary inline-flex items-center space-x-2"
             >
-              <div className="text-2xl mb-2">♔</div>
-              <div>Play as White</div>
+              <Plus className="w-5 h-5" />
+              <span>Create Game</span>
             </button>
+          </div>
+
+          {/* Join Game */}
+          <div className="bg-white rounded-lg shadow-lg p-6">
+            <h2 className="text-xl font-semibold mb-4">Join Existing Game</h2>
+            <p className="text-gray-600 mb-6">
+              Join a game that's waiting for players.
+            </p>
+            
+            {availableGames.length === 0 ? (
+              <p className="text-gray-500 italic">No games available</p>
+            ) : (
+              <div className="space-y-2">
+                {availableGames.map((game) => (
+                  <div
+                    key={game.game_id}
+                    className="flex items-center justify-between p-3 border rounded-lg hover:bg-gray-50"
+                  >
+                    <div>
+                      <span className="font-medium">Game {game.game_id}</span>
+                      <div className="text-sm text-gray-500">
+                        {game.players}/{game.max_players} players • {game.status}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => joinGame(game.game_id)}
+                      disabled={game.status === 'playing'}
+                      className="btn-secondary disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {game.status === 'playing' ? 'Full' : 'Join'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
             
             <button
-              onClick={joinAsBlack}
-              className="bg-black text-white border-2 border-black px-8 py-4 rounded-lg font-medium hover:bg-gray-800 transition-colors"
+              onClick={() => wsRef.current?.getGames()}
+              className="btn-secondary mt-4 inline-flex items-center space-x-2"
             >
-              <div className="text-2xl mb-2">♚</div>
-              <div>Play as Black</div>
+              <RotateCcw className="w-4 h-4" />
+              <span>Refresh</span>
             </button>
           </div>
         </div>
@@ -187,6 +289,44 @@ export function MultiplayerGame() {
     )
   }
 
+  // Show waiting screen if joined but game hasn't started
+  if (!gameStarted) {
+    return (
+      <div className="max-w-2xl mx-auto text-center">
+        <h1 className="text-3xl font-bold text-chess-dark mb-8">Waiting for Players</h1>
+        
+        <div className="bg-white rounded-lg shadow-lg p-8">
+          <div className="flex items-center justify-center space-x-2 mb-6">
+            <Wifi className="w-5 h-5 text-green-600" />
+            <span className="text-green-600 font-medium">Connected to server</span>
+          </div>
+          
+          <h2 className="text-xl font-semibold mb-4">Game ID: {currentGameId}</h2>
+          
+          <div className="flex items-center justify-center space-x-2 mb-6">
+            <Users className="w-5 h-5 text-blue-600" />
+            <span className="text-blue-600">
+              {opponentConnected ? 'Opponent joined!' : 'Waiting for opponent...'}
+            </span>
+          </div>
+          
+          <p className="text-gray-600 mb-6">
+            Share this game ID with another player to start the game.
+          </p>
+          
+          <button 
+            onClick={backToLobby} 
+            className="btn-secondary inline-flex items-center space-x-2"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            <span>Back to Lobby</span>
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // Show game if started
   if (!gameState) {
     return (
       <div className="text-center">
@@ -194,7 +334,7 @@ export function MultiplayerGame() {
           <Wifi className="w-5 h-5 text-green-600" />
           <span className="text-green-600">Connected</span>
         </div>
-        <p>Waiting for game to start...</p>
+        <p>Loading game...</p>
       </div>
     )
   }
@@ -218,6 +358,10 @@ export function MultiplayerGame() {
             </span>
           </div>
           
+          <div className="flex items-center space-x-2">
+            <span className="text-sm text-gray-600">Game: {currentGameId}</span>
+          </div>
+          
           <button 
             onClick={resetGame} 
             className="btn-secondary inline-flex items-center space-x-2"
@@ -233,6 +377,13 @@ export function MultiplayerGame() {
             <span className="font-medium">
               {isPlayerTurn() ? 'Your turn' : 'Opponent\'s turn'}
             </span>
+          </div>
+        )}
+
+        {/* Error display */}
+        {error && (
+          <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-2 rounded mb-4">
+            {error}
           </div>
         )}
       </div>
