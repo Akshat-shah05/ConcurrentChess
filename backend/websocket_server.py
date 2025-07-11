@@ -78,6 +78,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 
             msg_type = message.get("type")
             
+            # Update game_id from message if provided
+            if "game_id" in message:
+                game_id = message["game_id"]
+            
             if msg_type == "create_game":
                 # Create a new game
                 new_game_id = str(uuid.uuid4())[:8]
@@ -115,30 +119,33 @@ async def websocket_endpoint(websocket: WebSocket):
                 ))
                 
             elif msg_type == "join":
-                game_id = message.get("game_id")
-                if not game_id:
+                join_game_id = message.get("game_id")
+                if not join_game_id:
                     await websocket.send_text(ChessProtocol.create_message(
                         MESSAGE_TYPES["ERROR"], 
                         {"message": "Missing game_id in join"}
                     ))
                     continue
                     
-                if game_id not in _active_games:
+                if join_game_id not in _active_games:
                     await websocket.send_text(ChessProtocol.create_message(
                         MESSAGE_TYPES["ERROR"], 
                         {"message": "Game not found"}
                     ))
                     continue
                     
+                # Set the game_id for this connection
+                game_id = join_game_id
+                
                 # Add player to game
                 connections[game_id].add(websocket)
                 
                 # Assign color
-                if Color.WHITE not in [player_colors.get(ws) for ws in connections[game_id]]:
+                if "white" not in [player_colors.get(ws) for ws in connections[game_id]]:
                     player_colors[websocket] = "white"
                     player_color = "white"
                     game_players[game_id]["white"] = websocket
-                elif Color.BLACK not in [player_colors.get(ws) for ws in connections[game_id]]:
+                elif "black" not in [player_colors.get(ws) for ws in connections[game_id]]:
                     player_colors[websocket] = "black"
                     player_color = "black"
                     game_players[game_id]["black"] = websocket
