@@ -13,6 +13,7 @@ A modern chess application with AI and multiplayer support, featuring a concurre
 - Real-time multiplayer games using WebSocket connections
 - Live game state synchronization
 - Support for multiple concurrent games
+- Game lobby with create/join functionality
 
 ### ⚡ Concurrent Engine
 - Multi-threaded chess engine for fast AI moves
@@ -29,7 +30,8 @@ A modern chess application with AI and multiplayer support, featuring a concurre
 ```
 ConcurrentChess/
 ├── backend/           # Python FastAPI backend
-│   ├── main.py       # FastAPI server + WebSocket
+│   ├── main.py       # REST API server (AI mode)
+│   ├── websocket_server.py # WebSocket server (multiplayer)
 │   ├── chess_engine.py # Concurrent chess engine
 │   ├── chess_protocol.py # WebSocket message protocol
 │   └── test_all.py   # Comprehensive tests
@@ -50,7 +52,22 @@ ConcurrentChess/
 - Node.js 16+
 - npm
 
-### Installation
+### Installation & Setup
+
+#### Option 1: Automatic Setup (Recommended)
+```bash
+# Clone the repository
+git clone <repository-url>
+cd ConcurrentChess
+
+# Run the setup script (first time only)
+./setup.sh
+
+# Start the application
+./start.sh
+```
+
+#### Option 2: Manual Setup
 
 1. **Clone the repository**
 ```bash
@@ -79,16 +96,31 @@ npm install
 ./start.sh
 ```
 
+This script will:
+- ✅ Check all dependencies
+- ✅ Install missing packages
+- ✅ Start both backend servers (REST API + WebSocket)
+- ✅ Start the frontend development server
+- ✅ Show status of all services
+- ✅ Provide helpful tips
+
 #### Option 2: Start servers manually
 
-**Terminal 1 - Backend:**
+**Terminal 1 - REST API Backend (AI Mode):**
 ```bash
 cd backend
 source venv/bin/activate
-python main.py
+python -m uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-**Terminal 2 - Frontend:**
+**Terminal 2 - WebSocket Backend (Multiplayer Mode):**
+```bash
+cd backend
+source venv/bin/activate
+python -m uvicorn websocket_server:app --host 0.0.0.0 --port 8766
+```
+
+**Terminal 3 - Frontend:**
 ```bash
 cd frontend
 npm run dev
@@ -96,9 +128,9 @@ npm run dev
 
 ### Access the Application
 
-- **Frontend**: http://localhost:3000
-- **Backend API**: http://localhost:8000
-- **WebSocket**: ws://localhost:8766
+- **Frontend**: http://localhost:3000 (or check terminal for actual port)
+- **REST API (AI Mode)**: http://localhost:8000
+- **WebSocket (Multiplayer)**: ws://localhost:8766
 
 ## Usage
 
@@ -110,9 +142,10 @@ npm run dev
 
 ### Multiplayer Mode
 1. Navigate to "Multiplayer" from the home page
-2. Choose your color (White or Black)
-3. Play against another player in real-time
-4. Both players see the same board state
+2. **Create a Game**: Click "Create Game" to start a new game
+3. **Join a Game**: Browse available games and click "Join"
+4. Wait for an opponent to join
+5. Play chess in real-time with live board synchronization
 
 ## API Endpoints
 
@@ -125,11 +158,14 @@ npm run dev
 - `POST /api/games/{game_id}/ai_move` - Get AI move
 
 ### WebSocket Protocol (Multiplayer)
+- `create_game` - Create a new game
+- `get_games` - Get list of available games
+- `join` - Join a specific game
 - `board_state` - Get current board state
 - `legal_moves` - Get legal moves for current position
 - `move` - Make a move
-- `ai_move` - Get AI move (for testing)
-- `evaluation` - Get position evaluation
+- `player_assignment` - Receive player color assignment
+- `game_started` - Game is ready to play
 
 ## Development
 
@@ -141,6 +177,9 @@ python test_all.py
 
 # Run individual tests
 python test_client.py
+
+# Test WebSocket functionality
+python test_websocket.py
 ```
 
 ### Frontend Development
@@ -174,6 +213,31 @@ The frontend uses TypeScript for type safety and includes ESLint for code qualit
 - **AI Engine**: Multi-threaded with parallel move evaluation
 - **WebSocket**: Real-time communication with minimal latency
 - **Frontend**: Optimized React components with efficient re-rendering
+
+## Troubleshooting
+
+### Common Issues
+
+1. **"ModuleNotFoundError: No module named 'fastapi'"**
+   - Run `./setup.sh` to install all dependencies
+   - Or manually activate venv and run `pip install -r backend/requirements.txt`
+
+2. **Frontend not loading**
+   - Check if Node.js and npm are installed
+   - Run `cd frontend && npm install`
+
+3. **WebSocket connection failed**
+   - Ensure the WebSocket server is running on port 8766
+   - Check browser console for connection errors
+
+4. **Port already in use**
+   - The start script will automatically find available ports
+   - Check terminal output for actual URLs
+
+### Debug Information
+- Check browser console for frontend errors
+- Check terminal output for backend server logs
+- Use `./start.sh` for automatic dependency checking
 
 ## Contributing
 
